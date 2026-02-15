@@ -27,7 +27,7 @@ Core runtime flow:
 ### 1) Clone + submodule
 
 ```bash
-git clone <your-repo-url>
+git clone git@github.com:0xEniotna/extended-market-maker.git
 cd extended-market-maker
 git submodule update --init --recursive
 ```
