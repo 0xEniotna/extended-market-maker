@@ -9,7 +9,6 @@ from collections import Counter
 from pathlib import Path
 from typing import Iterable, Optional
 
-
 _ANALYSIS_FILL_RATE_RE = re.compile(r"^## Fill Rate: ([0-9.]+)%  \(([0-9]+) fills / ([0-9]+) orders\)")
 _ANALYSIS_MO5_RE = re.compile(r"^\s*\+5s: avg=([-0-9.]+)")
 _ANALYSIS_CANCEL_RE = re.compile(r"^\s*Cancellations: [0-9]+ \(([0-9.]+)%")
