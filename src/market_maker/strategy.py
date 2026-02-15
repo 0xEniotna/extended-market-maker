@@ -26,7 +26,6 @@ import time
 from decimal import ROUND_DOWN, Decimal
 from typing import Any, Dict, Optional
 
-from x10.perpetual.accounts import StarkPerpetualAccount
 from x10.perpetual.orders import OrderSide
 from x10.perpetual.trading_client import PerpetualTradingClient
 
@@ -43,8 +42,8 @@ from .reprice_pipeline import RepricePipeline
 from .risk_manager import RiskManager
 from .strategy_callbacks import on_fill, on_level_freed
 from .strategy_runner import run_strategy
-from .trend_signal import TrendSignal
 from .trade_journal import TradeJournal
+from .trend_signal import TrendSignal
 from .volatility_regime import VolatilityRegime
 
 logger = logging.getLogger(__name__)
