@@ -1,0 +1,197 @@
+"""
+Risk Manager
+
+Standalone position/risk tracking for the market making strategy.
+Enforces MAX_POSITION_SIZE before every order.
+
+Supports both periodic REST-based refresh and instant updates from the
+account WebSocket stream via ``handle_position_update()``.
+"""
+from __future__ import annotations
+
+import logging
+from decimal import Decimal
+
+from x10.perpetual.orders import OrderSide
+from x10.perpetual.positions import PositionModel, PositionSide, PositionStatus
+from x10.perpetual.trading_client import PerpetualTradingClient
+
+logger = logging.getLogger(__name__)
+
+
+class RiskManager:
+    """
+    Queries the current position for the configured market and enforces
+    the maximum position size limit.
+    """
+
+    def __init__(
+        self,
+        trading_client: PerpetualTradingClient,
+        market_name: str,
+        max_position_size: Decimal,
+        max_order_notional_usd: Decimal = Decimal("0"),
+        max_position_notional_usd: Decimal = Decimal("0"),
+    ) -> None:
+        self._client = trading_client
+        self._market_name = market_name
+        self._max_position_size = max_position_size
+        self._max_order_notional_usd = max_order_notional_usd
+        self._max_position_notional_usd = max_position_notional_usd
+        self._cached_position: Decimal = Decimal("0")
+
+    # ------------------------------------------------------------------
+    # Account-stream integration
+    # ------------------------------------------------------------------
+
+    def handle_position_update(self, pos: PositionModel) -> None:
+        """Called by AccountStreamManager on every position update.
+
+        Instantly updates the cached position so risk checks are always
+        based on the latest data, not the 10-second poll.
+        """
+        if pos.market != self._market_name:
+            return
+
+        if pos.status == PositionStatus.CLOSED:
+            self._cached_position = Decimal("0")
+        else:
+            sign = Decimal("-1") if pos.side == PositionSide.SHORT else Decimal("1")
+            self._cached_position = pos.size * sign
+
+        logger.debug(
+            "Position updated (stream): %s %s (raw side=%s size=%s)",
+            self._market_name,
+            self._cached_position,
+            pos.side,
+            pos.size,
+        )
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    async def refresh_position(self) -> Decimal:
+        """Fetch current position size from exchange and cache it.
+
+        Returns signed size (positive = long, negative = short).
+        """
+        try:
+            resp = await self._client.account.get_positions()
+            data = resp.data if hasattr(resp, "data") else resp
+
+            for pos in data or []:
+                market = getattr(pos, "market", None) or (
+                    pos.get("market") if isinstance(pos, dict) else None
+                )
+                if market != self._market_name:
+                    continue
+
+                size_abs = Decimal(str(getattr(pos, "size", "0")))
+                side = str(getattr(pos, "side", "")).upper()
+                sign = -1 if "SHORT" in side else 1
+                self._cached_position = size_abs * sign
+                return self._cached_position
+
+            # No position found for this market
+            self._cached_position = Decimal("0")
+            return self._cached_position
+        except Exception as exc:
+            logger.error("Failed to fetch position: %s", exc)
+            return self._cached_position
+
+    def get_current_position(self) -> Decimal:
+        """Return the last cached position."""
+        return self._cached_position
+
+    def allowed_order_size(
+        self,
+        side: OrderSide,
+        requested_size: Decimal,
+        reference_price: Decimal,
+        reserved_same_side_qty: Decimal = Decimal("0"),
+    ) -> Decimal:
+        """Return the maximum safe size that can be placed for this order.
+
+        Clips by:
+        - contract position size limit (``max_position_size``)
+        - per-order notional cap (``max_order_notional_usd``)
+        - total position notional cap (``max_position_notional_usd``)
+        - reserved same-side resting quantity headroom
+        """
+        if requested_size <= 0:
+            return Decimal("0")
+
+        clipped = requested_size
+        current = self._cached_position
+        reserved_same_side_qty = max(Decimal("0"), reserved_same_side_qty)
+
+        # Quantity headroom from max position size.
+        if self._max_position_size > 0:
+            if side == OrderSide.BUY:
+                qty_headroom = self._max_position_size - current - reserved_same_side_qty
+            else:
+                qty_headroom = self._max_position_size + current - reserved_same_side_qty
+            clipped = min(clipped, max(Decimal("0"), qty_headroom))
+
+        if reference_price > 0:
+            # Per-order notional cap.
+            if self._max_order_notional_usd > 0:
+                per_order_max_size = self._max_order_notional_usd / reference_price
+                clipped = min(clipped, max(Decimal("0"), per_order_max_size))
+
+            # Absolute position notional cap.
+            if self._max_position_notional_usd > 0:
+                current_notional = abs(current) * reference_price
+                reserved_notional = reserved_same_side_qty * reference_price
+                remaining_notional = (
+                    self._max_position_notional_usd
+                    - current_notional
+                    - reserved_notional
+                )
+                if remaining_notional <= 0:
+                    clipped = Decimal("0")
+                else:
+                    max_size_from_pos_notional = remaining_notional / reference_price
+                    clipped = min(
+                        clipped,
+                        max(Decimal("0"), max_size_from_pos_notional),
+                    )
+
+        clipped = max(Decimal("0"), clipped)
+        if clipped < requested_size:
+            logger.info(
+                "Order size clipped: side=%s requested=%s allowed=%s reserved=%s ref_price=%s",
+                side,
+                requested_size,
+                clipped,
+                reserved_same_side_qty,
+                reference_price,
+            )
+        return clipped
+
+    def can_place_order(self, side: OrderSide, size: Decimal) -> bool:
+        """Check whether placing *size* on *side* would breach the position limit.
+
+        A BUY increases position; a SELL decreases it.
+        """
+        allowed = self.allowed_order_size(
+            side=side,
+            requested_size=size,
+            reference_price=Decimal("0"),
+        )
+        within_limit = allowed >= size
+        if not within_limit:
+            if side == OrderSide.BUY:
+                projected = self._cached_position + size
+            else:
+                projected = self._cached_position - size
+            logger.warning(
+                "Position limit breach: current=%s side=%s size=%s projected=%s max=%s",
+                self._cached_position,
+                side,
+                size,
+                projected,
+                self._max_position_size,
+            )
+        return within_limit
