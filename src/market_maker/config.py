@@ -10,7 +10,7 @@ import os
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -104,6 +104,13 @@ class MarketMakerSettings(BaseSettings):
     market_name: str = Field(
         default="ETH-USD",
         description="Market to make on (e.g. ETH-USD)",
+    )
+    market_profile: Literal["legacy", "crypto"] = Field(
+        default="legacy",
+        description=(
+            "Behavior profile. 'legacy' keeps prior behavior, "
+            "'crypto' enables regime/trend/funding/inventory-band logic."
+        ),
     )
     num_price_levels: int = Field(
         default=2,
@@ -387,6 +394,126 @@ class MarketMakerSettings(BaseSettings):
         ),
     )
 
+    # --- Volatility Regime ---
+    vol_regime_enabled: bool = Field(
+        default=True,
+        description="Enable volatility regime classification.",
+    )
+    vol_regime_short_window_s: float = Field(
+        default=15.0,
+        ge=0,
+        description="Short horizon window (seconds) for volatility regime.",
+    )
+    vol_regime_medium_window_s: float = Field(
+        default=60.0,
+        ge=0,
+        description="Medium horizon window (seconds) for volatility regime.",
+    )
+    vol_regime_long_window_s: float = Field(
+        default=120.0,
+        ge=0,
+        description="Long horizon window (seconds) for volatility regime.",
+    )
+    vol_regime_calm_bps: Decimal = Field(
+        default=Decimal("8"),
+        ge=0,
+        description="Volatility threshold (bps) below which regime is CALM.",
+    )
+    vol_regime_elevated_bps: Decimal = Field(
+        default=Decimal("20"),
+        ge=0,
+        description="Volatility threshold (bps) above which regime is ELEVATED.",
+    )
+    vol_regime_extreme_bps: Decimal = Field(
+        default=Decimal("45"),
+        ge=0,
+        description="Volatility threshold (bps) above which regime is EXTREME.",
+    )
+    vol_offset_scale_calm: Decimal = Field(
+        default=Decimal("0.8"),
+        ge=0,
+        description="Offset scale applied in CALM regime.",
+    )
+    vol_offset_scale_elevated: Decimal = Field(
+        default=Decimal("1.5"),
+        ge=0,
+        description="Offset scale applied in ELEVATED regime.",
+    )
+    vol_offset_scale_extreme: Decimal = Field(
+        default=Decimal("2.2"),
+        ge=0,
+        description="Offset scale applied in EXTREME regime.",
+    )
+
+    # --- Trend Signal ---
+    trend_enabled: bool = Field(
+        default=True,
+        description="Enable trend estimation and directional quoting bias.",
+    )
+    trend_fast_ema_s: float = Field(
+        default=15.0,
+        ge=0,
+        description="Fast EMA horizon in seconds for trend estimation.",
+    )
+    trend_slow_ema_s: float = Field(
+        default=60.0,
+        ge=0,
+        description="Slow EMA horizon in seconds for trend estimation.",
+    )
+    trend_strong_threshold: Decimal = Field(
+        default=Decimal("0.7"),
+        ge=0,
+        le=1,
+        description="Trend strength threshold above which trend is considered strong.",
+    )
+    trend_counter_side_size_cut: Decimal = Field(
+        default=Decimal("0.6"),
+        ge=0,
+        le=1,
+        description="Max size reduction applied to counter-trend side.",
+    )
+    trend_skew_boost: Decimal = Field(
+        default=Decimal("1.5"),
+        ge=1,
+        description="Inventory skew multiplier under stronger trends.",
+    )
+
+    # --- Inventory Guard Bands ---
+    inventory_warn_pct: Decimal = Field(
+        default=Decimal("0.5"),
+        ge=0,
+        le=1,
+        description="Warn threshold as fraction of max position.",
+    )
+    inventory_critical_pct: Decimal = Field(
+        default=Decimal("0.8"),
+        ge=0,
+        le=1,
+        description="Critical threshold as fraction of max position.",
+    )
+    inventory_hard_pct: Decimal = Field(
+        default=Decimal("0.95"),
+        ge=0,
+        le=1,
+        description="Hard threshold as fraction of max position.",
+    )
+
+    # --- Funding Bias ---
+    funding_bias_enabled: bool = Field(
+        default=True,
+        description="Enable funding-rate-based carry bias for inventory handling.",
+    )
+    funding_inventory_weight: Decimal = Field(
+        default=Decimal("1.0"),
+        ge=0,
+        description="Weight applied to funding-rate inventory bias.",
+    )
+    funding_bias_cap_bps: Decimal = Field(
+        default=Decimal("5"),
+        ge=0,
+        description="Absolute cap (bps) for funding carry bias.",
+    )
+
     # --- Circuit Breaker ---
     circuit_breaker_max_failures: int = Field(
         default=5,
@@ -465,6 +592,13 @@ class MarketMakerSettings(BaseSettings):
     @field_validator("offset_mode", mode="before")
     @classmethod
     def _normalise_offset_mode(cls, v):
+        if isinstance(v, str):
+            return v.lower()
+        return v
+
+    @field_validator("market_profile", mode="before")
+    @classmethod
+    def _normalise_market_profile(cls, v):
         if isinstance(v, str):
             return v.lower()
         return v

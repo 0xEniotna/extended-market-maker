@@ -46,6 +46,20 @@ DEFAULT_BOUNDS = {
     "MM_FAILURE_RATE_TRIP": (Decimal("0.05"), Decimal("1.0")),
     "MM_MIN_ATTEMPTS_FOR_BREAKER": (Decimal("1"), Decimal("200")),
     "MM_NUM_PRICE_LEVELS": (Decimal("1"), Decimal("10")),
+    "MM_VOL_REGIME_CALM_BPS": (Decimal("2"), Decimal("20")),
+    "MM_VOL_REGIME_ELEVATED_BPS": (Decimal("5"), Decimal("60")),
+    "MM_VOL_REGIME_EXTREME_BPS": (Decimal("10"), Decimal("120")),
+    "MM_VOL_OFFSET_SCALE_CALM": (Decimal("0.5"), Decimal("1.0")),
+    "MM_VOL_OFFSET_SCALE_ELEVATED": (Decimal("1.0"), Decimal("3.0")),
+    "MM_VOL_OFFSET_SCALE_EXTREME": (Decimal("1.0"), Decimal("5.0")),
+    "MM_TREND_STRONG_THRESHOLD": (Decimal("0.2"), Decimal("1.0")),
+    "MM_TREND_COUNTER_SIDE_SIZE_CUT": (Decimal("0.0"), Decimal("1.0")),
+    "MM_TREND_SKEW_BOOST": (Decimal("1.0"), Decimal("3.0")),
+    "MM_INVENTORY_WARN_PCT": (Decimal("0.2"), Decimal("0.9")),
+    "MM_INVENTORY_CRITICAL_PCT": (Decimal("0.3"), Decimal("0.99")),
+    "MM_INVENTORY_HARD_PCT": (Decimal("0.5"), Decimal("0.999")),
+    "MM_FUNDING_INVENTORY_WEIGHT": (Decimal("0.0"), Decimal("3.0")),
+    "MM_FUNDING_BIAS_CAP_BPS": (Decimal("0.0"), Decimal("20.0")),
 }
 
 ALLOWED_TUNING_KEYS = {
@@ -68,6 +82,20 @@ ALLOWED_TUNING_KEYS = {
     "MM_IMBALANCE_PAUSE_THRESHOLD",
     "MM_FAILURE_RATE_TRIP",
     "MM_MIN_ATTEMPTS_FOR_BREAKER",
+    "MM_VOL_REGIME_CALM_BPS",
+    "MM_VOL_REGIME_ELEVATED_BPS",
+    "MM_VOL_REGIME_EXTREME_BPS",
+    "MM_VOL_OFFSET_SCALE_CALM",
+    "MM_VOL_OFFSET_SCALE_ELEVATED",
+    "MM_VOL_OFFSET_SCALE_EXTREME",
+    "MM_TREND_STRONG_THRESHOLD",
+    "MM_TREND_COUNTER_SIDE_SIZE_CUT",
+    "MM_TREND_SKEW_BOOST",
+    "MM_INVENTORY_WARN_PCT",
+    "MM_INVENTORY_CRITICAL_PCT",
+    "MM_INVENTORY_HARD_PCT",
+    "MM_FUNDING_INVENTORY_WEIGHT",
+    "MM_FUNDING_BIAS_CAP_BPS",
 }
 
 READONLY_KEYS = {
@@ -376,6 +404,44 @@ def compute_updates(
         if min_offset is not None and max_offset is not None and max_offset < min_offset:
             updates["MM_MAX_OFFSET_BPS"] = ensure_bounds("MM_MAX_OFFSET_BPS", min_offset + Decimal("1"), bounds)
             reasons.append("Raised max_offset_bps to keep >= min_offset_bps")
+
+    # Ensure volatility thresholds remain ordered: calm <= elevated <= extreme
+    calm = updates.get("MM_VOL_REGIME_CALM_BPS", current.get("MM_VOL_REGIME_CALM_BPS"))
+    elevated = updates.get(
+        "MM_VOL_REGIME_ELEVATED_BPS", current.get("MM_VOL_REGIME_ELEVATED_BPS")
+    )
+    extreme = updates.get(
+        "MM_VOL_REGIME_EXTREME_BPS", current.get("MM_VOL_REGIME_EXTREME_BPS")
+    )
+    if calm is not None and elevated is not None and elevated < calm:
+        updates["MM_VOL_REGIME_ELEVATED_BPS"] = ensure_bounds(
+            "MM_VOL_REGIME_ELEVATED_BPS", calm, bounds
+        )
+        elevated = updates["MM_VOL_REGIME_ELEVATED_BPS"]
+        reasons.append("Raised vol_regime_elevated_bps to keep >= calm threshold")
+    if elevated is not None and extreme is not None and extreme < elevated:
+        updates["MM_VOL_REGIME_EXTREME_BPS"] = ensure_bounds(
+            "MM_VOL_REGIME_EXTREME_BPS", elevated, bounds
+        )
+        reasons.append("Raised vol_regime_extreme_bps to keep >= elevated threshold")
+
+    # Ensure inventory bands remain ordered: warn <= critical <= hard
+    warn = updates.get("MM_INVENTORY_WARN_PCT", current.get("MM_INVENTORY_WARN_PCT"))
+    critical = updates.get(
+        "MM_INVENTORY_CRITICAL_PCT", current.get("MM_INVENTORY_CRITICAL_PCT")
+    )
+    hard = updates.get("MM_INVENTORY_HARD_PCT", current.get("MM_INVENTORY_HARD_PCT"))
+    if warn is not None and critical is not None and critical < warn:
+        updates["MM_INVENTORY_CRITICAL_PCT"] = ensure_bounds(
+            "MM_INVENTORY_CRITICAL_PCT", warn, bounds
+        )
+        critical = updates["MM_INVENTORY_CRITICAL_PCT"]
+        reasons.append("Raised inventory_critical_pct to keep >= inventory_warn_pct")
+    if critical is not None and hard is not None and hard < critical:
+        updates["MM_INVENTORY_HARD_PCT"] = ensure_bounds(
+            "MM_INVENTORY_HARD_PCT", critical, bounds
+        )
+        reasons.append("Raised inventory_hard_pct to keep >= inventory_critical_pct")
 
     # Remove no-op updates
     final_updates: Dict[str, Decimal] = {}

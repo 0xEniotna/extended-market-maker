@@ -253,6 +253,11 @@ class TradeJournal:
         target_price: Optional[Decimal] = None,
         spread_bps: Optional[Decimal] = None,
         extra_offset_bps: Optional[Decimal] = None,
+        regime: Optional[str] = None,
+        trend_direction: Optional[str] = None,
+        trend_strength: Optional[Decimal] = None,
+        inventory_band: Optional[str] = None,
+        funding_bias_bps: Optional[Decimal] = None,
     ) -> None:
         self._write("reprice_decision", {
             "side": side,
@@ -263,6 +268,11 @@ class TradeJournal:
             "target_price": target_price,
             "spread_bps": spread_bps,
             "extra_offset_bps": extra_offset_bps,
+            "regime": regime,
+            "trend_direction": trend_direction,
+            "trend_strength": trend_strength,
+            "inventory_band": inventory_band,
+            "funding_bias_bps": funding_bias_bps,
         })
 
     # ------------------------------------------------------------------

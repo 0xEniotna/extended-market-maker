@@ -15,7 +15,7 @@ import argparse
 import bisect
 import json
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -264,6 +264,7 @@ def _format_avg(values: List[Decimal]) -> str:
 def analyse(events: List[Dict[str, Any]], path: Path, assumed_fee_bps: Optional[Decimal]) -> str:
     fills = [e for e in events if e["type"] == "fill"]
     orders = [e for e in events if e["type"] == "order_placed"]
+    reprice_decisions = [e for e in events if e["type"] == "reprice_decision"]
     snapshots = [e for e in events if e["type"] == "snapshot"]
     rejections = [e for e in events if e["type"] == "rejection"]
     cancellations = [e for e in events if e["type"] == "order_cancelled"]
@@ -651,6 +652,81 @@ def analyse(events: List[Dict[str, Any]], path: Path, assumed_fee_bps: Optional[
         lines.append("")
     else:
         lines.append("## Order Placements: NONE")
+        lines.append("")
+
+    # ── Reprice decision telemetry ──
+    if reprice_decisions:
+        lines.append("## Reprice Decisions")
+        total = len(reprice_decisions)
+        lines.append(f"  Total: {total}")
+
+        reason_counts = Counter(
+            str(event.get("reason") or "unknown")
+            for event in reprice_decisions
+        )
+        lines.append("  Reasons:")
+        for reason, count in reason_counts.most_common(12):
+            pct = Decimal(count) / Decimal(total) * Decimal("100")
+            lines.append(f"    {reason}: {count} ({pct:.1f}%)")
+
+        skip_toxicity = reason_counts.get("skip_toxicity", 0)
+        toxicity_pct = Decimal(skip_toxicity) / Decimal(total) * Decimal("100")
+        lines.append(
+            f"  skip_toxicity share: {skip_toxicity}/{total} ({toxicity_pct:.1f}%)"
+        )
+
+        regime_counts = Counter(
+            str(event.get("regime"))
+            for event in reprice_decisions
+            if event.get("regime") is not None
+        )
+        if regime_counts:
+            lines.append("  Regimes:")
+            for regime, count in regime_counts.most_common():
+                pct = Decimal(count) / Decimal(total) * Decimal("100")
+                lines.append(f"    {regime}: {count} ({pct:.1f}%)")
+
+        trend_counts = Counter(
+            str(event.get("trend_direction"))
+            for event in reprice_decisions
+            if event.get("trend_direction") is not None
+        )
+        if trend_counts:
+            lines.append("  Trend directions:")
+            for direction, count in trend_counts.most_common():
+                pct = Decimal(count) / Decimal(total) * Decimal("100")
+                lines.append(f"    {direction}: {count} ({pct:.1f}%)")
+
+        band_counts = Counter(
+            str(event.get("inventory_band"))
+            for event in reprice_decisions
+            if event.get("inventory_band") is not None
+        )
+        if band_counts:
+            lines.append("  Inventory bands:")
+            for band, count in band_counts.most_common():
+                pct = Decimal(count) / Decimal(total) * Decimal("100")
+                lines.append(f"    {band}: {count} ({pct:.1f}%)")
+
+        trend_strengths = [
+            _d(event.get("trend_strength"))
+            for event in reprice_decisions
+            if event.get("trend_strength") is not None
+        ]
+        if trend_strengths:
+            avg_strength = sum(trend_strengths) / Decimal(len(trend_strengths))
+            lines.append(f"  Avg trend strength: {avg_strength:.3f}")
+
+        funding_bias_values = [
+            _d(event.get("funding_bias_bps"))
+            for event in reprice_decisions
+            if event.get("funding_bias_bps") is not None
+        ]
+        if funding_bias_values:
+            avg_funding_bias = sum(funding_bias_values) / Decimal(
+                len(funding_bias_values)
+            )
+            lines.append(f"  Avg funding bias: {avg_funding_bias:.2f}bps")
         lines.append("")
 
     # ── Spread over time (from snapshots) ──

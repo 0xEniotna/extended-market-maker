@@ -1,5 +1,36 @@
 # Market Maker Config Guide
 
+## 0. Profiles (Legacy vs Crypto)
+
+Use `MM_MARKET_PROFILE` to switch behavior:
+- `legacy` (default): keeps prior static guard/skew behavior for non-crypto parity.
+- `crypto`: enables volatility regimes, trend bias, inventory bands, and funding bias.
+
+Recommended crypto baseline:
+- `MM_MARKET_PROFILE=crypto`
+- `MM_VOL_REGIME_ENABLED=true`
+- `MM_VOL_REGIME_SHORT_WINDOW_S=15`
+- `MM_VOL_REGIME_MEDIUM_WINDOW_S=60`
+- `MM_VOL_REGIME_LONG_WINDOW_S=120`
+- `MM_VOL_REGIME_CALM_BPS=8`
+- `MM_VOL_REGIME_ELEVATED_BPS=20`
+- `MM_VOL_REGIME_EXTREME_BPS=45`
+- `MM_VOL_OFFSET_SCALE_CALM=0.8`
+- `MM_VOL_OFFSET_SCALE_ELEVATED=1.5`
+- `MM_VOL_OFFSET_SCALE_EXTREME=2.2`
+- `MM_TREND_ENABLED=true`
+- `MM_TREND_FAST_EMA_S=15`
+- `MM_TREND_SLOW_EMA_S=60`
+- `MM_TREND_STRONG_THRESHOLD=0.7`
+- `MM_TREND_COUNTER_SIDE_SIZE_CUT=0.6`
+- `MM_TREND_SKEW_BOOST=1.5`
+- `MM_INVENTORY_WARN_PCT=0.5`
+- `MM_INVENTORY_CRITICAL_PCT=0.8`
+- `MM_INVENTORY_HARD_PCT=0.95`
+- `MM_FUNDING_BIAS_ENABLED=true`
+- `MM_FUNDING_INVENTORY_WEIGHT=1.0`
+- `MM_FUNDING_BIAS_CAP_BPS=5`
+
 ## 1. Change Log (Grouped by Theme)
 
 ### Reprice Hysteresis (NEW)
@@ -35,6 +66,20 @@ Microstructure-aware guards that pause or widen quotes.
 - `MM_MICRO_VOL_WINDOW_S` / `MM_MICRO_VOL_MAX_BPS` — micro-volatility guard
 - `MM_MICRO_DRIFT_WINDOW_S` / `MM_MICRO_DRIFT_MAX_BPS` — micro-drift guard
 - `MM_VOLATILITY_OFFSET_MULTIPLIER` — extra offset widening in moderate stress
+
+### Volatility Regime (NEW)
+Profile-aware volatility classifier used by `MM_MARKET_PROFILE=crypto`.
+- `MM_VOL_REGIME_ENABLED`
+- `MM_VOL_REGIME_SHORT_WINDOW_S`, `MM_VOL_REGIME_MEDIUM_WINDOW_S`, `MM_VOL_REGIME_LONG_WINDOW_S`
+- `MM_VOL_REGIME_CALM_BPS`, `MM_VOL_REGIME_ELEVATED_BPS`, `MM_VOL_REGIME_EXTREME_BPS`
+- `MM_VOL_OFFSET_SCALE_CALM`, `MM_VOL_OFFSET_SCALE_ELEVATED`, `MM_VOL_OFFSET_SCALE_EXTREME`
+
+### Trend and Funding Bias (NEW)
+- `MM_TREND_ENABLED`
+- `MM_TREND_FAST_EMA_S`, `MM_TREND_SLOW_EMA_S`
+- `MM_TREND_STRONG_THRESHOLD`, `MM_TREND_COUNTER_SIDE_SIZE_CUT`, `MM_TREND_SKEW_BOOST`
+- `MM_FUNDING_BIAS_ENABLED`, `MM_FUNDING_INVENTORY_WEIGHT`, `MM_FUNDING_BIAS_CAP_BPS`
+- `MM_INVENTORY_WARN_PCT`, `MM_INVENTORY_CRITICAL_PCT`, `MM_INVENTORY_HARD_PCT`
 
 ### Failure-Rate Circuit Breaker (NEW)
 Rolling-window failure rate check (complements consecutive-failure breaker).

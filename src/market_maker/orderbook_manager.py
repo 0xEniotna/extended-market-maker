@@ -226,6 +226,10 @@ class OrderbookManager:
             return None
         return (last_mid - first_mid) / first_mid * Decimal("10000")
 
+    def mid_prices(self, window_s: float) -> List[Decimal]:
+        """Return recent mid prices over *window_s* seconds."""
+        return [mid for _, mid in self._mid_window(window_s)]
+
     def orderbook_imbalance(self, window_s: float) -> Optional[Decimal]:
         """Return smoothed top-of-book imbalance over *window_s* seconds.
 
