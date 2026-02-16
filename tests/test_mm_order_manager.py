@@ -27,7 +27,8 @@ _orders_mod.OrderStatus = SimpleNamespace(
     REJECTED="REJECTED",
 )
 _orders_mod.OrderType = SimpleNamespace(LIMIT="LIMIT")
-_orders_mod.TimeInForce = SimpleNamespace(GTT="GTT")
+_orders_mod.OrderType.MARKET = "MARKET"
+_orders_mod.TimeInForce = SimpleNamespace(GTT="GTT", IOC="IOC")
 _orders_mod.OpenOrderModel = object
 
 
@@ -81,6 +82,86 @@ async def test_place_order_success_resets_failures_and_indexes_exchange_id():
     info = manager.find_order_by_exchange_id("12345")
     assert info is not None
     assert info.level == 1
+
+
+@pytest.mark.asyncio
+async def test_flatten_position_submits_reduce_only_market_sell_for_long():
+    client = MagicMock()
+    client.place_order = AsyncMock(
+        return_value=SimpleNamespace(status="OK", error=None, data=SimpleNamespace(id=42))
+    )
+    manager = OrderManager(client, "TEST-USD")
+
+    result = await manager.flatten_position(
+        signed_position=Decimal("12.34"),
+        best_bid=Decimal("100"),
+        best_ask=Decimal("100.1"),
+        tick_size=Decimal("0.1"),
+        min_order_size=Decimal("1"),
+        size_step=Decimal("0.01"),
+        slippage_bps=Decimal("20"),
+    )
+
+    assert result.attempted is True
+    assert result.success is True
+
+    kwargs = client.place_order.await_args.kwargs
+    assert kwargs["market_name"] == "TEST-USD"
+    assert kwargs["amount_of_synthetic"] == Decimal("12.34")
+    assert kwargs["side"] == OrderSide.SELL
+    assert str(kwargs["order_type"]) == "MARKET"
+    assert str(kwargs["time_in_force"]) == "IOC"
+    assert kwargs["reduce_only"] is True
+    assert kwargs["post_only"] is False
+    assert kwargs["price"] == Decimal("99.8")
+
+
+@pytest.mark.asyncio
+async def test_flatten_position_submits_reduce_only_market_buy_for_short():
+    client = MagicMock()
+    client.place_order = AsyncMock(
+        return_value=SimpleNamespace(status="OK", error=None, data=SimpleNamespace(id=7))
+    )
+    manager = OrderManager(client, "TEST-USD")
+
+    result = await manager.flatten_position(
+        signed_position=Decimal("-5.00"),
+        best_bid=Decimal("99.9"),
+        best_ask=Decimal("100.0"),
+        tick_size=Decimal("0.1"),
+        min_order_size=Decimal("1"),
+        size_step=Decimal("0.01"),
+        slippage_bps=Decimal("25"),
+    )
+
+    assert result.attempted is True
+    assert result.success is True
+
+    kwargs = client.place_order.await_args.kwargs
+    assert kwargs["side"] == OrderSide.BUY
+    assert kwargs["amount_of_synthetic"] == Decimal("5.00")
+    assert kwargs["price"] == Decimal("100.3")
+
+
+@pytest.mark.asyncio
+async def test_flatten_position_noop_for_zero_position():
+    client = MagicMock()
+    client.place_order = AsyncMock()
+    manager = OrderManager(client, "TEST-USD")
+
+    result = await manager.flatten_position(
+        signed_position=Decimal("0"),
+        best_bid=Decimal("100"),
+        best_ask=Decimal("101"),
+        tick_size=Decimal("0.1"),
+        min_order_size=Decimal("1"),
+        size_step=Decimal("0.01"),
+        slippage_bps=Decimal("20"),
+    )
+
+    assert result.attempted is False
+    assert result.success is True
+    client.place_order.assert_not_awaited()
 
 
 def test_rejected_terminal_update_increments_failures_and_keeps_mapping():

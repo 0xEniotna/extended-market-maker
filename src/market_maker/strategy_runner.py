@@ -102,6 +102,10 @@ async def run_strategy(strategy_cls: Type) -> None:
         settings.max_position_size,
         max_order_notional_usd=settings.max_order_notional_usd,
         max_position_notional_usd=settings.max_position_notional_usd,
+        balance_aware_sizing_enabled=settings.balance_aware_sizing_enabled,
+        balance_usage_factor=settings.balance_usage_factor,
+        balance_notional_multiplier=settings.balance_notional_multiplier,
+        balance_min_available_usd=settings.balance_min_available_usd,
     )
     account_stream = AccountStreamManager(
         settings.endpoint_config, settings.api_key, settings.market_name
@@ -147,6 +151,7 @@ async def run_strategy(strategy_cls: Type) -> None:
 
     account_stream.on_order_update(order_mgr.handle_order_update)
     account_stream.on_position_update(risk_mgr.handle_position_update)
+    account_stream.on_balance_update(risk_mgr.handle_balance_update)
     order_mgr.on_level_freed(strategy._on_level_freed)
     account_stream.on_fill(strategy._on_fill)
 
@@ -214,7 +219,9 @@ async def run_strategy(strategy_cls: Type) -> None:
             )
 
     await risk_mgr.refresh_position()
+    await risk_mgr.refresh_balance()
     logger.info("Current position: %s", risk_mgr.get_current_position())
+    logger.info("Available for trade: %s", risk_mgr.get_available_for_trade())
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -226,6 +233,7 @@ async def run_strategy(strategy_cls: Type) -> None:
         tasks.append(asyncio.create_task(strategy._level_task(OrderSide.BUY, level), name=f"mm-buy-L{level}"))
         tasks.append(asyncio.create_task(strategy._level_task(OrderSide.SELL, level), name=f"mm-sell-L{level}"))
     tasks.append(asyncio.create_task(strategy._position_refresh_task(), name="mm-pos-refresh"))
+    tasks.append(asyncio.create_task(strategy._balance_refresh_task(), name="mm-balance-refresh"))
     tasks.append(asyncio.create_task(strategy._circuit_breaker_task(), name="mm-circuit-breaker"))
     tasks.append(asyncio.create_task(strategy._funding_refresh_task(), name="mm-funding-refresh"))
     logger.info("Market maker running with %d tasks", len(tasks))
@@ -233,12 +241,75 @@ async def run_strategy(strategy_cls: Type) -> None:
     try:
         await strategy._shutdown_event.wait()
     finally:
-        logger.info("Shutting down — cancelling tasks and orders...")
+        logger.info("Shutting down — cancelling tasks, orders, and flattening position...")
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        final_snap = metrics.snapshot()
         await order_mgr.cancel_all_orders()
+
+        await risk_mgr.refresh_position()
+        shutdown_position_before_flatten = risk_mgr.get_current_position()
+        flatten_enabled = settings.flatten_position_on_shutdown
+        flatten_attempted = False
+        flatten_submitted = False
+        flatten_reason = "disabled"
+        flatten_attempts = 0
+
+        if flatten_enabled:
+            flatten_reason = "already_flat"
+            for attempt in range(1, settings.shutdown_flatten_retries + 1):
+                current_position = risk_mgr.get_current_position()
+                if current_position == 0:
+                    flatten_reason = "already_flat"
+                    break
+
+                bid_lvl = ob_mgr.best_bid()
+                ask_lvl = ob_mgr.best_ask()
+                flatten_attempts = attempt
+                flatten_result = await order_mgr.flatten_position(
+                    signed_position=current_position,
+                    best_bid=bid_lvl.price if bid_lvl else None,
+                    best_ask=ask_lvl.price if ask_lvl else None,
+                    tick_size=tick_size,
+                    min_order_size=min_order_size,
+                    size_step=min_order_size_change,
+                    slippage_bps=settings.shutdown_flatten_slippage_bps,
+                )
+                flatten_attempted = flatten_attempted or flatten_result.attempted
+                flatten_submitted = flatten_submitted or flatten_result.success
+                flatten_reason = flatten_result.reason
+
+                await asyncio.sleep(settings.shutdown_flatten_retry_delay_s)
+                await risk_mgr.refresh_position()
+                remaining_position = risk_mgr.get_current_position()
+                if remaining_position == 0:
+                    flatten_reason = "flattened"
+                    logger.warning(
+                        "Shutdown flatten completed on attempt %d/%d for market=%s",
+                        attempt,
+                        settings.shutdown_flatten_retries,
+                        settings.market_name,
+                    )
+                    break
+
+                logger.warning(
+                    "Shutdown flatten attempt %d/%d incomplete for market=%s: "
+                    "before=%s remaining=%s reason=%s",
+                    attempt,
+                    settings.shutdown_flatten_retries,
+                    settings.market_name,
+                    current_position,
+                    remaining_position,
+                    flatten_result.reason,
+                )
+
+                if flatten_result.reason in {"below_min_order_size", "missing_orderbook_price"}:
+                    # Non-retryable without a position size or book update change.
+                    break
+
+        await risk_mgr.refresh_position()
+        shutdown_position_after_flatten = risk_mgr.get_current_position()
+        final_snap = metrics.snapshot()
         await metrics.stop()
         await account_stream.stop()
         await ob_mgr.stop()
@@ -256,6 +327,13 @@ async def run_strategy(strategy_cls: Type) -> None:
                 "consecutive_failures": final_snap.consecutive_failures,
                 "circuit_open": final_snap.circuit_open,
                 "uptime_s": Decimal(str(final_snap.uptime_s)),
+                "shutdown_position_before_flatten": shutdown_position_before_flatten,
+                "shutdown_position_after_flatten": shutdown_position_after_flatten,
+                "shutdown_flatten_enabled": flatten_enabled,
+                "shutdown_flatten_attempted": flatten_attempted,
+                "shutdown_flatten_submitted": flatten_submitted,
+                "shutdown_flatten_attempts": flatten_attempts,
+                "shutdown_flatten_reason": flatten_reason,
             },
         )
         journal.close()

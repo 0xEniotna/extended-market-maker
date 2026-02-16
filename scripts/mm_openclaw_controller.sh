@@ -5,10 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 JOURNAL_DIR="${REPO_ROOT}/data/mm_journal"
-PID_FILE="${JOURNAL_DIR}/mm_openclaw_controller.pid"
-LOG_FILE="${JOURNAL_DIR}/mm_openclaw_controller.log"
 
 BASE_ENV="${BASE_ENV:-.env.cop}"
+CONTROLLER_ID="${CONTROLLER_ID:-}"
 ITERATIONS="${ITERATIONS:-999999}"
 ANALYSIS_INTERVAL="${ANALYSIS_INTERVAL:-60}"
 MIN_FILLS="${MIN_FILLS:-10}"
@@ -27,6 +26,14 @@ if [[ -z "${PYTHON_BIN}" ]]; then
   fi
 fi
 
+if [[ -n "${CONTROLLER_ID}" ]]; then
+  PID_FILE="${JOURNAL_DIR}/mm_openclaw_controller_${CONTROLLER_ID}.pid"
+  LOG_FILE="${JOURNAL_DIR}/mm_openclaw_controller_${CONTROLLER_ID}.log"
+else
+  PID_FILE="${JOURNAL_DIR}/mm_openclaw_controller.pid"
+  LOG_FILE="${JOURNAL_DIR}/mm_openclaw_controller.log"
+fi
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -38,6 +45,7 @@ Usage:
 
 Config via env vars:
   BASE_ENV=.env.cop
+  CONTROLLER_ID=amzn
   ITERATIONS=999999
   ANALYSIS_INTERVAL=60
   MIN_FILLS=10

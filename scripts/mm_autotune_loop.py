@@ -136,6 +136,11 @@ def _decimal(val: str) -> Optional[Decimal]:
         return None
 
 
+def _slugify_token(value: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_")
+    return slug or "unknown"
+
+
 def find_repo_root(start: Path) -> Path:
     current = start.resolve()
     for parent in [current] + list(current.parents):
@@ -452,14 +457,19 @@ def compute_updates(
     return final_updates, reasons
 
 
-def find_latest_journal(journal_dir: Path, since: Optional[float]) -> Optional[Path]:
-    files = sorted(journal_dir.glob("mm_*.jsonl"), key=lambda p: p.stat().st_mtime)
+def find_latest_journal(
+    journal_dir: Path,
+    since: Optional[float],
+    market_name: Optional[str] = None,
+) -> Optional[Path]:
+    pattern = f"mm_{market_name}_*.jsonl" if market_name else "mm_*.jsonl"
+    files = sorted(journal_dir.glob(pattern), key=lambda p: p.stat().st_mtime)
     if not files:
         return None
     if since is None:
         return files[-1]
     candidates = [p for p in files if p.stat().st_mtime >= since]
-    return candidates[-1] if candidates else files[-1]
+    return candidates[-1] if candidates else None
 
 
 def start_market_maker(repo: Path, env_file: Path) -> subprocess.Popen:
@@ -483,7 +493,12 @@ def stop_market_maker(proc: subprocess.Popen) -> None:
         proc.wait(timeout=10)
 
 
-def run_analysis(repo: Path, target: Path, assumed_fee_bps: str) -> Path:
+def run_analysis(
+    repo: Path,
+    target: Path,
+    assumed_fee_bps: str,
+    market_name: Optional[str] = None,
+) -> Path:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(repo / "src")
 
@@ -497,7 +512,7 @@ def run_analysis(repo: Path, target: Path, assumed_fee_bps: str) -> Path:
     subprocess.check_call(cmd, cwd=str(repo), env=env)
 
     if target.is_dir():
-        latest = find_latest_journal(target, since=None)
+        latest = find_latest_journal(target, since=None, market_name=market_name)
         if not latest:
             raise RuntimeError("No journal files found after analysis")
         return latest.with_suffix(".analysis.txt")
@@ -538,6 +553,11 @@ def main() -> None:
         default=10,
         help="Minimum fills required to evaluate realized PnL",
     )
+    parser.add_argument(
+        "--market-name",
+        default=None,
+        help="Market symbol used to filter journals (default: MM_MARKET_NAME in env file)",
+    )
     parser.add_argument("--assumed-fee-bps", default="0", help="Fee bps for analysis")
     parser.add_argument("--journal-dir", default="data/mm_journal", help="Journal directory")
     parser.add_argument("--dry-run", action="store_true", help="Only compute next config, no execution")
@@ -560,13 +580,21 @@ def main() -> None:
             "MM_ENVIRONMENT=mainnet detected. Re-run with --allow-mainnet if this is intentional."
         )
 
+    market_name = args.market_name or env_map.get("MM_MARKET_NAME")
+    if not market_name:
+        raise SystemExit(
+            "Unable to infer market name. Set MM_MARKET_NAME in base env or pass --market-name."
+        )
+
     max_position_size = _decimal(env_map.get("MM_MAX_POSITION_SIZE", ""))
 
     # Bounds can be overridden by env vars if needed
     bounds = dict(DEFAULT_BOUNDS)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    log_path = journal_dir / f"mm_tuning_log_{timestamp}.jsonl"
+    base_env_slug = _slugify_token(base_env.name)
+    market_slug = _slugify_token(market_name)
+    log_path = journal_dir / f"mm_tuning_log_{market_slug}_{base_env_slug}_{timestamp}.jsonl"
 
     prev_env_file: Optional[Path] = None
 
@@ -608,11 +636,20 @@ def main() -> None:
                 continue
 
             last_analysis = now
-            latest_journal = find_latest_journal(journal_dir, since=run_started)
+            latest_journal = find_latest_journal(
+                journal_dir,
+                since=run_started,
+                market_name=market_name,
+            )
             if latest_journal is None:
                 continue
 
-            analysis_path = run_analysis(repo, latest_journal, args.assumed_fee_bps)
+            analysis_path = run_analysis(
+                repo,
+                latest_journal,
+                args.assumed_fee_bps,
+                market_name=market_name,
+            )
             metrics = parse_metrics(analysis_path)
             realized_pnl = compute_realized_pnl_last_n_fills(latest_journal, n=args.min_fills)
             metrics.last10_realized_pnl = realized_pnl
@@ -640,6 +677,7 @@ def main() -> None:
 
         entry = {
             "iteration": i,
+            "market_name": market_name,
             "env_file": str(iter_env),
             "analysis_file": str(analysis_path) if analysis_path else None,
             "stop_reason": stop_reason,

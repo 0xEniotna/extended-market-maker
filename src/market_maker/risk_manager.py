@@ -32,13 +32,25 @@ class RiskManager:
         max_position_size: Decimal,
         max_order_notional_usd: Decimal = Decimal("0"),
         max_position_notional_usd: Decimal = Decimal("0"),
+        *,
+        balance_aware_sizing_enabled: bool = True,
+        balance_usage_factor: Decimal = Decimal("0.95"),
+        balance_notional_multiplier: Decimal = Decimal("1.0"),
+        balance_min_available_usd: Decimal = Decimal("0"),
     ) -> None:
         self._client = trading_client
         self._market_name = market_name
         self._max_position_size = max_position_size
         self._max_order_notional_usd = max_order_notional_usd
         self._max_position_notional_usd = max_position_notional_usd
+        self._balance_aware_sizing_enabled = balance_aware_sizing_enabled
+        self._balance_usage_factor = max(Decimal("0"), balance_usage_factor)
+        self._balance_notional_multiplier = max(Decimal("0"), balance_notional_multiplier)
+        self._balance_min_available_usd = max(Decimal("0"), balance_min_available_usd)
         self._cached_position: Decimal = Decimal("0")
+        self._cached_available_for_trade: Decimal | None = None
+        self._cached_equity: Decimal | None = None
+        self._cached_initial_margin: Decimal | None = None
 
     # ------------------------------------------------------------------
     # Account-stream integration
@@ -66,6 +78,10 @@ class RiskManager:
             pos.side,
             pos.size,
         )
+
+    def handle_balance_update(self, balance) -> None:
+        """Called by AccountStreamManager when balance/equity updates arrive."""
+        self._update_balance_cache(balance)
 
     # ------------------------------------------------------------------
     # Public API
@@ -100,9 +116,25 @@ class RiskManager:
             logger.error("Failed to fetch position: %s", exc)
             return self._cached_position
 
+    async def refresh_balance(self) -> Decimal | None:
+        """Fetch account collateral balance and cache available_for_trade."""
+        try:
+            resp = await self._client.account.get_balance()
+            data = resp.data if hasattr(resp, "data") else resp
+            if data is not None:
+                self._update_balance_cache(data)
+            return self._cached_available_for_trade
+        except Exception as exc:
+            logger.debug("Failed to fetch balance: %s", exc)
+            return self._cached_available_for_trade
+
     def get_current_position(self) -> Decimal:
         """Return the last cached position."""
         return self._cached_position
+
+    def get_available_for_trade(self) -> Decimal | None:
+        """Return the last cached available-for-trade collateral."""
+        return self._cached_available_for_trade
 
     def allowed_order_size(
         self,
@@ -110,6 +142,7 @@ class RiskManager:
         requested_size: Decimal,
         reference_price: Decimal,
         reserved_same_side_qty: Decimal = Decimal("0"),
+        reserved_open_notional_usd: Decimal = Decimal("0"),
     ) -> Decimal:
         """Return the maximum safe size that can be placed for this order.
 
@@ -118,6 +151,7 @@ class RiskManager:
         - per-order notional cap (``max_order_notional_usd``)
         - total position notional cap (``max_position_notional_usd``)
         - reserved same-side resting quantity headroom
+        - account available_for_trade headroom (when enabled)
         """
         if requested_size <= 0:
             return Decimal("0")
@@ -125,6 +159,7 @@ class RiskManager:
         clipped = requested_size
         current = self._cached_position
         reserved_same_side_qty = max(Decimal("0"), reserved_same_side_qty)
+        reserved_open_notional_usd = max(Decimal("0"), reserved_open_notional_usd)
 
         # Quantity headroom from max position size.
         if self._max_position_size > 0:
@@ -158,14 +193,36 @@ class RiskManager:
                         max(Decimal("0"), max_size_from_pos_notional),
                     )
 
+            if (
+                self._balance_aware_sizing_enabled
+                and self._cached_available_for_trade is not None
+            ):
+                balance_headroom = (
+                    self._cached_available_for_trade * self._balance_usage_factor
+                ) - self._balance_min_available_usd
+                notional_headroom = (
+                    balance_headroom * self._balance_notional_multiplier
+                ) - reserved_open_notional_usd
+                if notional_headroom <= 0:
+                    clipped = Decimal("0")
+                else:
+                    max_size_from_balance = notional_headroom / reference_price
+                    clipped = min(
+                        clipped,
+                        max(Decimal("0"), max_size_from_balance),
+                    )
+
         clipped = max(Decimal("0"), clipped)
         if clipped < requested_size:
             logger.info(
-                "Order size clipped: side=%s requested=%s allowed=%s reserved=%s ref_price=%s",
+                "Order size clipped: side=%s requested=%s allowed=%s reserved_qty=%s reserved_notional=%s "
+                "avail_for_trade=%s ref_price=%s",
                 side,
                 requested_size,
                 clipped,
                 reserved_same_side_qty,
+                reserved_open_notional_usd,
+                self._cached_available_for_trade,
                 reference_price,
             )
         return clipped
@@ -195,3 +252,16 @@ class RiskManager:
                 self._max_position_size,
             )
         return within_limit
+
+    def _update_balance_cache(self, balance) -> None:
+        """Normalize and cache account balance/equity fields."""
+        available_for_trade = getattr(balance, "available_for_trade", None)
+        equity = getattr(balance, "equity", None)
+        initial_margin = getattr(balance, "initial_margin", None)
+
+        if available_for_trade is not None:
+            self._cached_available_for_trade = Decimal(str(available_for_trade))
+        if equity is not None:
+            self._cached_equity = Decimal(str(equity))
+        if initial_margin is not None:
+            self._cached_initial_margin = Decimal(str(initial_margin))

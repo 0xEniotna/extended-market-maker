@@ -311,12 +311,18 @@ class RepricePipeline:
             for ext_id, info in active_orders.items()
             if str(info.side) == str(side) and ext_id != prev_ext_id
         )
+        reserved_open_notional_usd = sum(
+            info.size * info.price
+            for ext_id, info in active_orders.items()
+            if ext_id != prev_ext_id
+        )
         level_size = strategy._quantize_size(
             strategy._risk.allowed_order_size(
                 side,
                 requested_size,
                 target_price,
                 reserved_same_side_qty=reserved_same_side_qty,
+                reserved_open_notional_usd=reserved_open_notional_usd,
             )
         )
 

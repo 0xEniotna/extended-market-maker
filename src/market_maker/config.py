@@ -187,6 +187,36 @@ class MarketMakerSettings(BaseSettings):
             "0 disables this cap."
         ),
     )
+    balance_aware_sizing_enabled: bool = Field(
+        default=True,
+        description=(
+            "When true, clip order size using account available_for_trade "
+            "to account for exchange-side margin reservation of open orders."
+        ),
+    )
+    balance_usage_factor: Decimal = Field(
+        default=Decimal("0.95"),
+        ge=Decimal("0"),
+        description=(
+            "Fraction of available_for_trade to treat as usable headroom. "
+            "Values below 1 keep a safety margin."
+        ),
+    )
+    balance_notional_multiplier: Decimal = Field(
+        default=Decimal("1.0"),
+        ge=Decimal("0"),
+        description=(
+            "Converts available collateral headroom to notional headroom. "
+            "Set above 1 when trading with leverage."
+        ),
+    )
+    balance_min_available_usd: Decimal = Field(
+        default=Decimal("0"),
+        ge=Decimal("0"),
+        description=(
+            "Absolute collateral buffer to keep untouched before sizing new orders."
+        ),
+    )
     reprice_tolerance_percent: Decimal = Field(
         default=Decimal("0.1"),
         gt=0,
@@ -546,6 +576,37 @@ class MarketMakerSettings(BaseSettings):
     enabled: bool = Field(
         default=True,
         description="Kill switch — set to false to disable the market maker",
+    )
+    flatten_position_on_shutdown: bool = Field(
+        default=True,
+        description=(
+            "When true, on shutdown submit a reduce-only MARKET+IOC order "
+            "to flatten any open position after cancelling resting orders."
+        ),
+    )
+    shutdown_flatten_slippage_bps: Decimal = Field(
+        default=Decimal("20"),
+        ge=0,
+        description=(
+            "Price aggressiveness (bps) used for shutdown flatten orders. "
+            "Higher values increase fill probability."
+        ),
+    )
+    shutdown_flatten_retries: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        description=(
+            "Maximum flatten attempts on shutdown before giving up."
+        ),
+    )
+    shutdown_flatten_retry_delay_s: float = Field(
+        default=1.0,
+        ge=0,
+        le=60,
+        description=(
+            "Delay between shutdown flatten retries."
+        ),
     )
 
     # --- Logging ---

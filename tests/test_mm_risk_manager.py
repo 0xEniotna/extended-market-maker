@@ -36,6 +36,10 @@ def _make_rm(
     max_position_size: Decimal = Decimal("100"),
     max_order_notional_usd: Decimal = Decimal("0"),
     max_position_notional_usd: Decimal = Decimal("0"),
+    balance_aware_sizing_enabled: bool = False,
+    balance_usage_factor: Decimal = Decimal("0.95"),
+    balance_notional_multiplier: Decimal = Decimal("1.0"),
+    balance_min_available_usd: Decimal = Decimal("0"),
 ) -> RiskManager:
     return RiskManager(
         trading_client=MagicMock(),
@@ -43,6 +47,10 @@ def _make_rm(
         max_position_size=max_position_size,
         max_order_notional_usd=max_order_notional_usd,
         max_position_notional_usd=max_position_notional_usd,
+        balance_aware_sizing_enabled=balance_aware_sizing_enabled,
+        balance_usage_factor=balance_usage_factor,
+        balance_notional_multiplier=balance_notional_multiplier,
+        balance_min_available_usd=balance_min_available_usd,
     )
 
 
@@ -99,3 +107,33 @@ def test_allowed_order_size_accounts_for_reserved_same_side_qty():
         reserved_same_side_qty=Decimal("20"),
     )
     assert allowed == Decimal("10")
+
+
+def test_allowed_order_size_clips_by_available_for_trade_headroom():
+    rm = _make_rm(
+        balance_aware_sizing_enabled=True,
+        balance_usage_factor=Decimal("0.9"),
+        balance_notional_multiplier=Decimal("2.0"),
+        balance_min_available_usd=Decimal("10"),
+    )
+    rm._cached_available_for_trade = Decimal("100")
+    allowed = rm.allowed_order_size(
+        side=OrderSide.BUY,
+        requested_size=Decimal("10"),
+        reference_price=Decimal("20"),
+        reserved_open_notional_usd=Decimal("100"),
+    )
+    # usable_notional = (100*0.9 - 10) * 2 - 100 = 60 => size 3
+    assert allowed == Decimal("3")
+
+
+def test_handle_balance_update_refreshes_cached_available_for_trade():
+    rm = _make_rm(balance_aware_sizing_enabled=True)
+    rm.handle_balance_update(
+        SimpleNamespace(
+            available_for_trade=Decimal("123.45"),
+            equity=Decimal("150"),
+            initial_margin=Decimal("12"),
+        )
+    )
+    assert rm.get_available_for_trade() == Decimal("123.45")

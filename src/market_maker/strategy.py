@@ -52,6 +52,7 @@ logger = logging.getLogger(__name__)
 # The account stream handles real-time updates; this is a fallback.
 _POSITION_REFRESH_INTERVAL_S = 30.0
 _FUNDING_REFRESH_INTERVAL_S = 300.0
+_BALANCE_REFRESH_INTERVAL_S = 10.0
 
 # Default circuit-breaker settings
 _CIRCUIT_BREAKER_MAX_FAILURES = 5
@@ -502,6 +503,17 @@ class MarketMakerStrategy:
             except Exception:
                 logger.debug("Funding refresh failed", exc_info=True)
             await asyncio.sleep(_FUNDING_REFRESH_INTERVAL_S)
+
+    async def _balance_refresh_task(self) -> None:
+        """Periodically refresh available-for-trade collateral headroom."""
+        while not self._shutdown_event.is_set():
+            try:
+                await self._risk.refresh_balance()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.debug("Balance refresh failed", exc_info=True)
+            await asyncio.sleep(_BALANCE_REFRESH_INTERVAL_S)
 
     def _order_age_exceeded(
         self,

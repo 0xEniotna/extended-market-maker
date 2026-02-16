@@ -136,8 +136,20 @@ class FakeRisk:
     def can_place_order(self, side, size):
         return True
 
-    def allowed_order_size(self, side, requested_size, reference_price, reserved_same_side_qty=Decimal("0")):
-        _ = (side, reference_price, reserved_same_side_qty)
+    def allowed_order_size(
+        self,
+        side,
+        requested_size,
+        reference_price,
+        reserved_same_side_qty=Decimal("0"),
+        reserved_open_notional_usd=Decimal("0"),
+    ):
+        _ = (
+            side,
+            reference_price,
+            reserved_same_side_qty,
+            reserved_open_notional_usd,
+        )
         return requested_size
 
 

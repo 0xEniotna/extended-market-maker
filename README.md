@@ -63,12 +63,28 @@ PYTHONPATH=src python scripts/run_market_maker.py
 ## Main Scripts
 
 - `scripts/analyse_mm_journal.py`: summarize one run or the latest journal in a directory.
-- `scripts/mm_autotune_loop.py`: run-analyze-adjust loop using bounded MM_* key updates.
+- `scripts/mm_autotune_loop.py`: run-analyze-adjust loop using bounded MM\_\* key updates.
+- `scripts/mm_openclaw_controller.sh`: single-instance long-running autotune controller.
+- `scripts/mm_openclaw_fleet.sh`: run multiple autotune controllers (one per `.env.*` instance).
 - `scripts/screen_mm_markets.py`: spread/tick/volume suitability screening.
 - `scripts/tools/find_mm_markets.py`: rolling market filter for MM candidates.
 - `scripts/tools/fetch_market_info.py`: inspect trading config and stats for one market.
 - `scripts/tools/fetch_pnl.py`: account-level market PnL summary.
 - `scripts/tools/analyze_mm_logs.py`: parse text logs for lifecycle and latency diagnostics.
+
+## Multi-Instance Supervision
+
+Run one controller per strategy instance:
+
+```bash
+cd /path/to/repo
+scripts/mm_openclaw_fleet.sh start .env.asset
+scripts/mm_openclaw_fleet.sh status .env.asset
+scripts/mm_openclaw_fleet.sh logs .env.asset
+```
+
+Each controller monitors only its own market journal and will stop/tune/restart only that instance when degradation is detected.  
+On shutdown/restart, the runtime now attempts to flatten that market's open position (reduce-only `MARKET+IOC`) after cancelling resting orders.
 
 ## Safety Notes
 

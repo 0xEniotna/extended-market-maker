@@ -16,7 +16,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import ROUND_DOWN, ROUND_UP, Decimal
 from typing import Callable, Dict, List, Optional
 
 from x10.perpetual.orders import (
@@ -50,6 +50,18 @@ class OrderInfo:
     level: int
     exchange_order_id: Optional[str] = None
     placed_at: float = field(default_factory=time.monotonic)
+
+
+@dataclass
+class FlattenResult:
+    """Result of a shutdown flatten attempt."""
+
+    attempted: bool
+    success: bool
+    reason: str
+    side: Optional[OrderSide] = None
+    size: Optional[Decimal] = None
+    price: Optional[Decimal] = None
 
 
 # Callback invoked when an order for a specific level is removed (filled / cancelled).
@@ -285,6 +297,135 @@ class OrderManager:
             for ext_id in ext_ids:
                 await self.cancel_order(ext_id)
 
+    async def flatten_position(
+        self,
+        *,
+        signed_position: Decimal,
+        best_bid: Optional[Decimal],
+        best_ask: Optional[Decimal],
+        tick_size: Decimal,
+        min_order_size: Decimal,
+        size_step: Decimal,
+        slippage_bps: Decimal,
+    ) -> FlattenResult:
+        """Submit a reduce-only MARKET+IOC order to flatten a signed position."""
+        if signed_position == 0:
+            return FlattenResult(
+                attempted=False,
+                success=True,
+                reason="already_flat",
+            )
+
+        side = OrderSide.SELL if signed_position > 0 else OrderSide.BUY
+        close_size = self._round_down_to_step(abs(signed_position), size_step)
+        if close_size < min_order_size:
+            logger.warning(
+                "Skipping flatten for market=%s: |position|=%s rounds to size=%s < min_order_size=%s",
+                self._market_name,
+                signed_position,
+                close_size,
+                min_order_size,
+            )
+            return FlattenResult(
+                attempted=False,
+                success=False,
+                reason="below_min_order_size",
+                side=side,
+                size=close_size,
+            )
+
+        ref_price = best_bid if side == OrderSide.SELL else best_ask
+        if ref_price is None or ref_price <= 0:
+            # Fallback to opposite side if one side is temporarily missing.
+            ref_price = best_ask if side == OrderSide.SELL else best_bid
+        if ref_price is None or ref_price <= 0:
+            logger.error(
+                "Cannot flatten position for market=%s: missing usable orderbook price (bid=%s ask=%s)",
+                self._market_name,
+                best_bid,
+                best_ask,
+            )
+            return FlattenResult(
+                attempted=False,
+                success=False,
+                reason="missing_orderbook_price",
+                side=side,
+                size=close_size,
+            )
+
+        bps = max(Decimal("0"), slippage_bps) / Decimal("10000")
+        if side == OrderSide.SELL:
+            target_price = ref_price * (Decimal("1") - bps)
+        else:
+            target_price = ref_price * (Decimal("1") + bps)
+        price = self._round_to_tick_for_side(target_price, tick_size, side)
+        if price <= 0:
+            price = tick_size if tick_size > 0 else Decimal("1")
+
+        external_id = f"mm-flat-{uuid.uuid4().hex[:12]}"
+        try:
+            resp = await self._client.place_order(
+                market_name=self._market_name,
+                amount_of_synthetic=close_size,
+                price=price,
+                side=side,
+                order_type=OrderType.MARKET,
+                time_in_force=TimeInForce.IOC,
+                post_only=False,
+                reduce_only=True,
+                external_id=external_id,
+            )
+            if hasattr(resp, "status") and hasattr(resp, "error"):
+                if resp.status != "OK" or resp.error is not None:
+                    logger.error(
+                        "Flatten order rejected: market=%s side=%s size=%s price=%s error=%s",
+                        self._market_name,
+                        side,
+                        close_size,
+                        price,
+                        resp.error,
+                    )
+                    return FlattenResult(
+                        attempted=True,
+                        success=False,
+                        reason=f"rejected:{resp.error}",
+                        side=side,
+                        size=close_size,
+                        price=price,
+                    )
+            logger.warning(
+                "Submitted shutdown flatten order: market=%s side=%s size=%s price=%s ext_id=%s",
+                self._market_name,
+                side,
+                close_size,
+                price,
+                external_id,
+            )
+            return FlattenResult(
+                attempted=True,
+                success=True,
+                reason="submitted",
+                side=side,
+                size=close_size,
+                price=price,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Failed to submit shutdown flatten order: market=%s side=%s size=%s price=%s",
+                self._market_name,
+                side,
+                close_size,
+                price,
+            )
+            return FlattenResult(
+                attempted=True,
+                success=False,
+                reason=f"exception:{exc}",
+                side=side,
+                size=close_size,
+                price=price,
+            )
+
     def get_active_orders(self) -> Dict[str, OrderInfo]:
         return dict(self._active_orders)
 
@@ -325,6 +466,19 @@ class OrderManager:
     @staticmethod
     def _generate_external_id() -> str:
         return f"mm-{uuid.uuid4().hex[:12]}"
+
+    @staticmethod
+    def _round_down_to_step(value: Decimal, step: Decimal) -> Decimal:
+        if step <= 0:
+            return value
+        return (value / step).to_integral_value(rounding=ROUND_DOWN) * step
+
+    @staticmethod
+    def _round_to_tick_for_side(price: Decimal, tick_size: Decimal, side: OrderSide) -> Decimal:
+        if tick_size <= 0:
+            return price
+        rounding = ROUND_UP if side == OrderSide.BUY else ROUND_DOWN
+        return (price / tick_size).to_integral_value(rounding=rounding) * tick_size
 
     @staticmethod
     def _extract_exchange_id(resp) -> Optional[str]:

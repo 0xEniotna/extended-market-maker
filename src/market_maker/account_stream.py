@@ -65,6 +65,7 @@ class AccountStreamMetrics:
 OrderUpdateCallback = Callable[[OpenOrderModel], None]
 PositionUpdateCallback = Callable[[PositionModel], None]
 FillCallback = Callable[[FillEvent], None]
+BalanceUpdateCallback = Callable[[object], None]
 
 
 class AccountStreamManager:
@@ -93,6 +94,7 @@ class AccountStreamManager:
         self._order_callbacks: List[OrderUpdateCallback] = []
         self._position_callbacks: List[PositionUpdateCallback] = []
         self._fill_callbacks: List[FillCallback] = []
+        self._balance_callbacks: List[BalanceUpdateCallback] = []
 
         # Public metrics
         self.metrics = AccountStreamMetrics()
@@ -112,6 +114,10 @@ class AccountStreamManager:
     def on_fill(self, cb: FillCallback) -> None:
         """Register a callback invoked on every trade/fill."""
         self._fill_callbacks.append(cb)
+
+    def on_balance_update(self, cb: BalanceUpdateCallback) -> None:
+        """Register a callback invoked on every balance update."""
+        self._balance_callbacks.append(cb)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -182,6 +188,10 @@ class AccountStreamManager:
             for trade in data.trades:
                 if trade.market == self._market_name:
                     self._dispatch_trade(trade)
+
+        # --- Balance updates ---
+        if data.balance is not None:
+            self._dispatch_balance_update(data.balance)
 
     def _dispatch_order_update(self, order: OpenOrderModel) -> None:
         """Process a single order update from the stream."""
@@ -254,3 +264,10 @@ class AccountStreamManager:
                 cb(fill)
             except Exception as exc:
                 logger.error("Fill callback error: %s", exc)
+
+    def _dispatch_balance_update(self, balance) -> None:
+        for cb in self._balance_callbacks:
+            try:
+                cb(balance)
+            except Exception as exc:
+                logger.error("Balance callback error: %s", exc)
