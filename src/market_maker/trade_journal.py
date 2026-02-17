@@ -275,6 +275,23 @@ class TradeJournal:
             "funding_bias_bps": funding_bias_bps,
         })
 
+    def record_drawdown_stop(
+        self,
+        *,
+        current_pnl: Decimal,
+        peak_pnl: Decimal,
+        drawdown: Decimal,
+        threshold_usd: Decimal,
+        action: str,
+    ) -> None:
+        self._write("drawdown_stop", {
+            "current_pnl": current_pnl,
+            "peak_pnl": peak_pnl,
+            "drawdown": drawdown,
+            "threshold_usd": threshold_usd,
+            "action": action,
+        })
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------

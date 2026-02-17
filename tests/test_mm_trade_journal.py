@@ -77,3 +77,20 @@ def test_fill_record_keeps_market_snapshot_payload(tmp_path):
     assert records[0]["type"] == "fill"
     assert records[0]["market_snapshot"]["depth"] == 5
     assert len(records[0]["market_snapshot"]["bids_top"]) == 1
+
+
+def test_drawdown_stop_event_is_recorded(tmp_path):
+    journal = TradeJournal("TEST-USD", journal_dir=tmp_path, run_id="run-dd")
+    journal.record_drawdown_stop(
+        current_pnl=Decimal("-18"),
+        peak_pnl=Decimal("5"),
+        drawdown=Decimal("23"),
+        threshold_usd=Decimal("20"),
+        action="cancel_all_flatten_terminate",
+    )
+    journal.close()
+
+    records = _read_records(journal.path)
+    assert len(records) == 1
+    assert records[0]["type"] == "drawdown_stop"
+    assert records[0]["drawdown"] == "23"

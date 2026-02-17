@@ -50,6 +50,7 @@ _orders_mod.TimeInForce = SimpleNamespace(GTT="GTT")
 
 # Now safe to import
 from market_maker.config import MarketMakerSettings  # noqa: E402
+from market_maker.decision_models import TrendState  # noqa: E402
 from market_maker.orderbook_manager import OrderbookManager, PriceLevel  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -127,11 +128,15 @@ class FakeOrderbook:
 
 
 class FakeRisk:
-    def __init__(self, position: Decimal = Decimal("0")):
+    def __init__(self, position: Decimal = Decimal("0"), total_pnl: Decimal = Decimal("0")):
         self._pos = position
+        self._total_pnl = total_pnl
 
     def get_current_position(self):
         return self._pos
+
+    def get_position_total_pnl(self):
+        return self._total_pnl
 
     def can_place_order(self, side, size):
         return True
@@ -168,6 +173,8 @@ def _make_strategy(
     max_offset_bps: Decimal = Decimal("50"),
     inventory_skew_factor: Decimal = Decimal("0.05"),
     max_position_size: Decimal = Decimal("300"),
+    max_position_notional_usd: Decimal = Decimal("2500"),
+    market_profile: str = "legacy",
 ):
     """Build a strategy instance with all dependencies mocked."""
     from market_maker.strategy import MarketMakerStrategy
@@ -178,12 +185,14 @@ def _make_strategy(
         stark_public_key="0x2",
         api_key="key",
         market_name="TEST-USD",
+        market_profile=market_profile,
         offset_mode=offset_mode,
         spread_multiplier=spread_multiplier,
         min_offset_bps=min_offset_bps,
         max_offset_bps=max_offset_bps,
         inventory_skew_factor=inventory_skew_factor,
         max_position_size=max_position_size,
+        max_position_notional_usd=max_position_notional_usd,
         reprice_tolerance_percent=Decimal("0.5"),
     )
 
@@ -530,6 +539,105 @@ class TestImbalancePause:
 
         await s._maybe_reprice(OrderSide.SELL, 0)
         s._orders.place_order.assert_not_awaited()
+
+
+class TestInventoryBands:
+    @pytest.mark.asyncio
+    async def test_critical_band_blocks_inventory_increasing_side(self):
+        s = _make_strategy(position=Decimal("240"), max_position_size=Decimal("300"))
+        s._orders.place_order = AsyncMock(return_value="ext-1")
+
+        await s._maybe_reprice(OrderSide.BUY, 0)
+        s._orders.place_order.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_critical_band_allows_inventory_reducing_side(self):
+        s = _make_strategy(position=Decimal("240"), max_position_size=Decimal("300"))
+        s._orders.place_order = AsyncMock(return_value="ext-1")
+
+        await s._maybe_reprice(OrderSide.SELL, 0)
+        s._orders.place_order.assert_awaited_once()
+
+
+class TestTrendOneWay:
+    @pytest.mark.asyncio
+    async def test_one_way_trend_blocks_counter_side_all_levels(self):
+        s = _make_strategy(market_profile="crypto")
+        s._settings.trend_one_way_enabled = True
+        s._settings.trend_cancel_counter_on_strong = False
+        s._settings.trend_strong_threshold = Decimal("0.7")
+        s._orders.place_order = AsyncMock(return_value="ext-1")
+        s._trend_signal = SimpleNamespace(
+            evaluate=lambda: TrendState(direction="BULLISH", strength=Decimal("0.9"))
+        )
+
+        await s._maybe_reprice(OrderSide.SELL, 1)
+        s._orders.place_order.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_one_way_trend_can_cancel_resting_counter_side(self):
+        s = _make_strategy(market_profile="crypto")
+        s._settings.trend_one_way_enabled = True
+        s._settings.trend_cancel_counter_on_strong = True
+        s._settings.trend_strong_threshold = Decimal("0.7")
+        s._orders.cancel_order = AsyncMock(return_value=True)
+        s._trend_signal = SimpleNamespace(
+            evaluate=lambda: TrendState(direction="BULLISH", strength=Decimal("1.0"))
+        )
+        key = (str(OrderSide.SELL), 0)
+        s._level_ext_ids[key] = "ext-1"
+        s._level_order_created_at[key] = time.monotonic()
+        s._orders.get_active_orders.return_value = {
+            "ext-1": SimpleNamespace(
+                side=OrderSide.SELL,
+                price=Decimal("1.62"),
+                size=Decimal("10"),
+                level=0,
+            )
+        }
+
+        await s._maybe_reprice(OrderSide.SELL, 0)
+        s._orders.cancel_order.assert_awaited_once_with("ext-1")
+
+    @pytest.mark.asyncio
+    async def test_default_trend_behavior_still_allows_reduced_counter_side_on_l1(self):
+        s = _make_strategy(market_profile="crypto")
+        s._settings.trend_one_way_enabled = False
+        s._settings.trend_strong_threshold = Decimal("0.7")
+        s._orders.place_order = AsyncMock(return_value="ext-1")
+        s._trend_signal = SimpleNamespace(
+            evaluate=lambda: TrendState(direction="BULLISH", strength=Decimal("1.0"))
+        )
+
+        await s._maybe_reprice(OrderSide.SELL, 1)
+        s._orders.place_order.assert_awaited_once()
+
+
+class TestDrawdownStop:
+    def test_drawdown_stop_triggers_shutdown_and_journal_event(self):
+        s = _make_strategy(
+            max_position_notional_usd=Decimal("1000"),
+            market_profile="crypto",
+        )
+        s._settings.drawdown_stop_enabled = True
+        s._settings.drawdown_stop_pct_of_max_notional = Decimal("1.5")
+        s._settings.drawdown_use_high_watermark = True
+        from market_maker.drawdown_stop import DrawdownStop
+
+        s._drawdown_stop = DrawdownStop(
+            enabled=s._settings.drawdown_stop_enabled,
+            max_position_notional_usd=s._settings.max_position_notional_usd,
+            drawdown_pct_of_max_notional=s._settings.drawdown_stop_pct_of_max_notional,
+            use_high_watermark=s._settings.drawdown_use_high_watermark,
+        )
+
+        s._risk._total_pnl = Decimal("40")
+        assert s._evaluate_drawdown_stop() is False
+        s._risk._total_pnl = Decimal("25")
+        assert s._evaluate_drawdown_stop() is True
+        assert s._shutdown_event.is_set()
+        assert s.shutdown_reason == "drawdown_stop"
+        s._journal.record_drawdown_stop.assert_called_once()
 
 
 class TestRunMetadata:

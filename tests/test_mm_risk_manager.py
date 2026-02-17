@@ -3,7 +3,9 @@ from __future__ import annotations
 import sys
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 _SDK_MODULES = [
     "x10",
@@ -22,8 +24,8 @@ _orders_mod.OrderSide = SimpleNamespace(BUY="BUY", SELL="SELL")
 
 _positions_mod = sys.modules["x10.perpetual.positions"]
 _positions_mod.PositionModel = object
-_positions_mod.PositionSide = SimpleNamespace(SHORT="SHORT")
-_positions_mod.PositionStatus = SimpleNamespace(CLOSED="CLOSED")
+_positions_mod.PositionSide = SimpleNamespace(SHORT="SHORT", LONG="LONG")
+_positions_mod.PositionStatus = SimpleNamespace(CLOSED="CLOSED", OPENED="OPENED")
 
 
 from market_maker.risk_manager import RiskManager  # noqa: E402
@@ -175,3 +177,72 @@ def test_reducing_order_only_balance_clips_opening_remainder():
     # Reducing component (68) is preserved, opening component (12) is clipped by
     # remaining notional headroom: (1500 - 1400) / 100 = 1.
     assert allowed == Decimal("69")
+
+
+def test_handle_position_update_tracks_total_position_pnl():
+    rm = _make_rm()
+    rm.handle_position_update(
+        SimpleNamespace(
+            market="TEST-USD",
+            status=_positions_mod.PositionStatus.OPENED,
+            side=_positions_mod.PositionSide.LONG,
+            size=Decimal("7"),
+            realised_pnl=Decimal("12.5"),
+            unrealised_pnl=Decimal("-2.0"),
+        )
+    )
+
+    assert rm.get_current_position() == Decimal("7")
+    assert rm.get_position_realized_pnl() == Decimal("12.5")
+    assert rm.get_position_unrealized_pnl() == Decimal("-2.0")
+    assert rm.get_position_total_pnl() == Decimal("10.5")
+
+
+def test_handle_position_update_closed_resets_position_pnl():
+    rm = _make_rm()
+    rm.handle_position_update(
+        SimpleNamespace(
+            market="TEST-USD",
+            status=_positions_mod.PositionStatus.OPENED,
+            side=_positions_mod.PositionSide.LONG,
+            size=Decimal("2"),
+            realised_pnl=Decimal("1"),
+            unrealised_pnl=Decimal("3"),
+        )
+    )
+    rm.handle_position_update(
+        SimpleNamespace(
+            market="TEST-USD",
+            status=_positions_mod.PositionStatus.CLOSED,
+            side=_positions_mod.PositionSide.SHORT,
+            size=Decimal("0"),
+            realised_pnl=Decimal("0"),
+            unrealised_pnl=Decimal("0"),
+        )
+    )
+
+    assert rm.get_current_position() == Decimal("0")
+    assert rm.get_position_total_pnl() == Decimal("0")
+
+
+@pytest.mark.asyncio
+async def test_refresh_position_updates_cached_position_pnl():
+    rm = _make_rm()
+    rm._client.account.get_positions = AsyncMock(
+        return_value=SimpleNamespace(
+            data=[
+                SimpleNamespace(
+                    market="TEST-USD",
+                    size=Decimal("5"),
+                    side="LONG",
+                    realised_pnl=Decimal("-4.5"),
+                    unrealised_pnl=Decimal("1.0"),
+                )
+            ]
+        )
+    )
+
+    await rm.refresh_position()
+
+    assert rm.get_current_position() == Decimal("5")
+    assert rm.get_position_total_pnl() == Decimal("-3.5")

@@ -236,6 +236,7 @@ async def run_strategy(strategy_cls: Type) -> None:
     tasks.append(asyncio.create_task(strategy._balance_refresh_task(), name="mm-balance-refresh"))
     tasks.append(asyncio.create_task(strategy._circuit_breaker_task(), name="mm-circuit-breaker"))
     tasks.append(asyncio.create_task(strategy._funding_refresh_task(), name="mm-funding-refresh"))
+    tasks.append(asyncio.create_task(strategy._drawdown_watchdog_task(), name="mm-drawdown-watchdog"))
     logger.info("Market maker running with %d tasks", len(tasks))
 
     try:
@@ -249,7 +250,8 @@ async def run_strategy(strategy_cls: Type) -> None:
 
         await risk_mgr.refresh_position()
         shutdown_position_before_flatten = risk_mgr.get_current_position()
-        flatten_enabled = settings.flatten_position_on_shutdown
+        shutdown_reason = strategy.shutdown_reason
+        flatten_enabled = settings.flatten_position_on_shutdown or shutdown_reason == "drawdown_stop"
         flatten_attempted = False
         flatten_submitted = False
         flatten_reason = "disabled"
@@ -315,7 +317,7 @@ async def run_strategy(strategy_cls: Type) -> None:
         await ob_mgr.stop()
         await trading_client.close()
         journal.record_run_end(
-            reason="shutdown",
+            reason=shutdown_reason,
             stats={
                 "position": final_snap.position,
                 "active_orders": final_snap.active_orders,

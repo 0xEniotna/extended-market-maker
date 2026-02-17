@@ -24,12 +24,17 @@ Recommended crypto baseline:
 - `MM_TREND_STRONG_THRESHOLD=0.7`
 - `MM_TREND_COUNTER_SIDE_SIZE_CUT=0.6`
 - `MM_TREND_SKEW_BOOST=1.5`
+- `MM_TREND_ONE_WAY_ENABLED=false`
+- `MM_TREND_CANCEL_COUNTER_ON_STRONG=false`
 - `MM_INVENTORY_WARN_PCT=0.5`
 - `MM_INVENTORY_CRITICAL_PCT=0.8`
 - `MM_INVENTORY_HARD_PCT=0.95`
 - `MM_FUNDING_BIAS_ENABLED=true`
 - `MM_FUNDING_INVENTORY_WEIGHT=1.0`
 - `MM_FUNDING_BIAS_CAP_BPS=5`
+- `MM_DRAWDOWN_STOP_ENABLED=false`
+- `MM_DRAWDOWN_STOP_PCT_OF_MAX_NOTIONAL=1.5`
+- `MM_DRAWDOWN_USE_HIGH_WATERMARK=true`
 
 ## 1. Change Log (Grouped by Theme)
 
@@ -78,8 +83,14 @@ Profile-aware volatility classifier used by `MM_MARKET_PROFILE=crypto`.
 - `MM_TREND_ENABLED`
 - `MM_TREND_FAST_EMA_S`, `MM_TREND_SLOW_EMA_S`
 - `MM_TREND_STRONG_THRESHOLD`, `MM_TREND_COUNTER_SIDE_SIZE_CUT`, `MM_TREND_SKEW_BOOST`
+- `MM_TREND_ONE_WAY_ENABLED`, `MM_TREND_CANCEL_COUNTER_ON_STRONG`
 - `MM_FUNDING_BIAS_ENABLED`, `MM_FUNDING_INVENTORY_WEIGHT`, `MM_FUNDING_BIAS_CAP_BPS`
 - `MM_INVENTORY_WARN_PCT`, `MM_INVENTORY_CRITICAL_PCT`, `MM_INVENTORY_HARD_PCT`
+
+### Per-Asset Drawdown Stop (NEW)
+- `MM_DRAWDOWN_STOP_ENABLED`
+- `MM_DRAWDOWN_STOP_PCT_OF_MAX_NOTIONAL`
+- `MM_DRAWDOWN_USE_HIGH_WATERMARK`
 
 ### Failure-Rate Circuit Breaker (NEW)
 Rolling-window failure rate check (complements consecutive-failure breaker).
@@ -139,6 +150,19 @@ Rolling-window failure rate check (complements consecutive-failure breaker).
 | `MM_SKEW_SHAPE_K` | 2.0 | Tanh curvature: 0=linear, higher=more aggressive at extremes | Higher → gentle near flat, steep at limits; Lower → linear response | 1.0–4.0 | Increase if you want to tolerate small positions but aggressively shed large ones. |
 | `MM_SKEW_MAX_BPS` | 20 | Max skew offset contribution (bps, before skew_factor) | Higher → more aggressive inventory reduction at limits | 10–50 | Increase if inventory regularly hits max_position. |
 
+### Trend, Inventory Bands, and Drawdown Stop
+
+| Variable | Default | What it controls | Tradeoff | Safe range | Tune |
+|---|---|---|---|---|---|
+| `MM_INVENTORY_WARN_PCT` | 0.5 | Warn band as fraction of max position | Lower → earlier warning/stronger skew behavior | 0.3–0.8 | Lower if inventory climbs too often. |
+| `MM_INVENTORY_CRITICAL_PCT` | 0.8 | Critical band where inventory-increasing quoting is blocked | Lower → safer, fewer fills | 0.5–0.95 | Lower for trend-heavy markets. |
+| `MM_INVENTORY_HARD_PCT` | 0.95 | Hard band where inventory-increasing quoting is blocked | Lower → more conservative cap | 0.7–0.99 | Keep above critical. |
+| `MM_TREND_ONE_WAY_ENABLED` | false | In crypto profile, disable all strong counter-trend quoting | On = better trend protection, fewer contrarian fills | true/false | Enable when one-way moves cause persistent drawdowns. |
+| `MM_TREND_CANCEL_COUNTER_ON_STRONG` | false | Cancel resting counter-trend orders during strong trend | On = faster de-risk, less passive fill chance | true/false | Enable with one-way mode for strict risk control. |
+| `MM_DRAWDOWN_STOP_ENABLED` | false | Enable per-asset drawdown shutdown trigger | On = hard loss cap, more downtime | true/false | Enable on volatile/new markets first. |
+| `MM_DRAWDOWN_STOP_PCT_OF_MAX_NOTIONAL` | 1.5 | Drawdown threshold = this % of `MM_MAX_POSITION_NOTIONAL_USD` | Lower → trips earlier | 0.25–3.0 | Reduce if tail losses still too large. |
+| `MM_DRAWDOWN_USE_HIGH_WATERMARK` | true | Drawdown measured from peak PnL (else run-start PnL) | True = tighter profit-protection behavior | true/false | Keep true unless you explicitly want run-start mode. |
+
 ### Toxicity / Microstructure
 
 | Variable | Default | What it controls | Tradeoff | Safe range | Tune |
@@ -192,6 +216,7 @@ And forced refresh: `MAX_ORDER_AGE_S` forces reprice regardless of above.
 `ORDER_SIZE_MULTIPLIER × min_order_size` → capped by `MAX_ORDER_NOTIONAL_USD / price`.
 Position capped by BOTH `MAX_POSITION_SIZE` (contracts) AND `MAX_POSITION_NOTIONAL_USD` (USD).
 The tighter constraint wins.
+Inventory-increasing quotes are blocked when the inventory band reaches `CRITICAL` or `HARD`.
 
 ### Skew Controls
 `INVENTORY_SKEW_FACTOR` scales the total skew output.

@@ -99,16 +99,40 @@ class RepricePipeline:
             else TrendState()
         )
         min_interval, max_order_age_s = strategy._volatility.cadence(regime)
+        active_orders = strategy._orders.get_active_orders()
+        prev_ext_id = strategy._level_ext_ids.get(key)
+        prev_order = active_orders.get(prev_ext_id) if prev_ext_id else None
+
+        # In crypto profile, optionally force one-way quoting in strong trends.
+        if strategy._is_strong_counter_trend_side(side_name, trend):
+            strategy._record_reprice_decision(
+                side=side,
+                level=level,
+                reason="skip_trend_counter_strong",
+                regime=regime.regime,
+                trend_direction=trend.direction,
+                trend_strength=trend.strength,
+                inventory_band=strategy._pricing.inventory_band(),
+                funding_bias_bps=strategy._funding_bias_bps(),
+            )
+            if (
+                prev_ext_id is not None
+                and strategy._settings.trend_cancel_counter_on_strong
+            ):
+                await strategy._cancel_level_order(
+                    key=key,
+                    external_id=prev_ext_id,
+                    side=side,
+                    level=level,
+                    reason="trend_counter_strong",
+                )
+            return
 
         # --- Min reprice interval: prevent cancel/place churn ---
         if min_interval > 0:
             last_reprice = strategy._level_last_reprice_at.get(key, 0.0)
             if (now - last_reprice) < min_interval:
                 return
-
-        active_orders = strategy._orders.get_active_orders()
-        prev_ext_id = strategy._level_ext_ids.get(key)
-        prev_order = active_orders.get(prev_ext_id) if prev_ext_id else None
 
         # --- Stale orderbook fail-safe ---
         if strategy._ob.is_stale():
@@ -290,11 +314,7 @@ class RepricePipeline:
         # Compute per-level order size (pyramid scaling)
         requested_size = strategy._level_size(level)
         if strategy._settings.market_profile == "crypto":
-            counter_side = None
-            if trend.direction == "BULLISH":
-                counter_side = "SELL"
-            elif trend.direction == "BEARISH":
-                counter_side = "BUY"
+            counter_side = strategy._counter_trend_side(trend)
             if counter_side is not None and side_name == counter_side:
                 if (
                     trend.strength >= strategy._settings.trend_strong_threshold

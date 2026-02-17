@@ -48,6 +48,9 @@ class RiskManager:
         self._balance_notional_multiplier = max(Decimal("0"), balance_notional_multiplier)
         self._balance_min_available_usd = max(Decimal("0"), balance_min_available_usd)
         self._cached_position: Decimal = Decimal("0")
+        self._cached_realized_pnl: Decimal = Decimal("0")
+        self._cached_unrealized_pnl: Decimal = Decimal("0")
+        self._cached_total_position_pnl: Decimal = Decimal("0")
         self._cached_available_for_trade: Decimal | None = None
         self._cached_equity: Decimal | None = None
         self._cached_initial_margin: Decimal | None = None
@@ -67,16 +70,22 @@ class RiskManager:
 
         if pos.status == PositionStatus.CLOSED:
             self._cached_position = Decimal("0")
+            self._reset_position_pnl()
         else:
             sign = Decimal("-1") if pos.side == PositionSide.SHORT else Decimal("1")
             self._cached_position = pos.size * sign
+            self._update_position_pnl(
+                realized=getattr(pos, "realised_pnl", Decimal("0")),
+                unrealized=getattr(pos, "unrealised_pnl", Decimal("0")),
+            )
 
         logger.debug(
-            "Position updated (stream): %s %s (raw side=%s size=%s)",
+            "Position updated (stream): %s %s (raw side=%s size=%s pnl=%s)",
             self._market_name,
             self._cached_position,
             pos.side,
             pos.size,
+            self._cached_total_position_pnl,
         )
 
     def handle_balance_update(self, balance) -> None:
@@ -107,10 +116,21 @@ class RiskManager:
                 side = str(getattr(pos, "side", "")).upper()
                 sign = -1 if "SHORT" in side else 1
                 self._cached_position = size_abs * sign
+                realized = getattr(pos, "realised_pnl", None)
+                unrealized = getattr(pos, "unrealised_pnl", None)
+                if realized is None and isinstance(pos, dict):
+                    realized = pos.get("realised_pnl", "0")
+                if unrealized is None and isinstance(pos, dict):
+                    unrealized = pos.get("unrealised_pnl", "0")
+                self._update_position_pnl(
+                    realized=realized if realized is not None else Decimal("0"),
+                    unrealized=unrealized if unrealized is not None else Decimal("0"),
+                )
                 return self._cached_position
 
             # No position found for this market
             self._cached_position = Decimal("0")
+            self._reset_position_pnl()
             return self._cached_position
         except Exception as exc:
             logger.error("Failed to fetch position: %s", exc)
@@ -131,6 +151,18 @@ class RiskManager:
     def get_current_position(self) -> Decimal:
         """Return the last cached position."""
         return self._cached_position
+
+    def get_position_realized_pnl(self) -> Decimal:
+        """Return last cached realised PnL for this market position."""
+        return self._cached_realized_pnl
+
+    def get_position_unrealized_pnl(self) -> Decimal:
+        """Return last cached unrealised PnL for this market position."""
+        return self._cached_unrealized_pnl
+
+    def get_position_total_pnl(self) -> Decimal:
+        """Return last cached realised+unrealised PnL for this market position."""
+        return self._cached_total_position_pnl
 
     def get_available_for_trade(self) -> Decimal | None:
         """Return the last cached available-for-trade collateral."""
@@ -279,6 +311,18 @@ class RiskManager:
             self._cached_equity = Decimal(str(equity))
         if initial_margin is not None:
             self._cached_initial_margin = Decimal(str(initial_margin))
+
+    def _update_position_pnl(self, *, realized, unrealized) -> None:
+        realized_dec = Decimal(str(realized))
+        unrealized_dec = Decimal(str(unrealized))
+        self._cached_realized_pnl = realized_dec
+        self._cached_unrealized_pnl = unrealized_dec
+        self._cached_total_position_pnl = realized_dec + unrealized_dec
+
+    def _reset_position_pnl(self) -> None:
+        self._cached_realized_pnl = Decimal("0")
+        self._cached_unrealized_pnl = Decimal("0")
+        self._cached_total_position_pnl = Decimal("0")
 
     @staticmethod
     def _is_buy_side(side: OrderSide) -> bool:

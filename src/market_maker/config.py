@@ -507,6 +507,20 @@ class MarketMakerSettings(BaseSettings):
         ge=1,
         description="Inventory skew multiplier under stronger trends.",
     )
+    trend_one_way_enabled: bool = Field(
+        default=False,
+        description=(
+            "When enabled (crypto profile only), disable all counter-trend "
+            "quoting while trend strength is above trend_strong_threshold."
+        ),
+    )
+    trend_cancel_counter_on_strong: bool = Field(
+        default=False,
+        description=(
+            "When trend_one_way_enabled is true, immediately cancel resting "
+            "counter-trend orders under strong trend."
+        ),
+    )
 
     # --- Inventory Guard Bands ---
     inventory_warn_pct: Decimal = Field(
@@ -542,6 +556,30 @@ class MarketMakerSettings(BaseSettings):
         default=Decimal("5"),
         ge=0,
         description="Absolute cap (bps) for funding carry bias.",
+    )
+
+    # --- Per-Asset Drawdown Stop ---
+    drawdown_stop_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable per-asset drawdown stop based on market position PnL "
+            "(realised + unrealised)."
+        ),
+    )
+    drawdown_stop_pct_of_max_notional: Decimal = Field(
+        default=Decimal("1.5"),
+        ge=0,
+        description=(
+            "Drawdown threshold as percent of max_position_notional_usd. "
+            "Example: 1.5 means threshold = 1.5% of max notional."
+        ),
+    )
+    drawdown_use_high_watermark: bool = Field(
+        default=True,
+        description=(
+            "Use high-water-mark drawdown (peak PnL minus current PnL). "
+            "If false, drawdown is measured from run-start PnL."
+        ),
     )
 
     # --- Circuit Breaker ---

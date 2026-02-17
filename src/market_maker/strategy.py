@@ -32,6 +32,7 @@ from x10.perpetual.trading_client import PerpetualTradingClient
 from .account_stream import AccountStreamManager, FillEvent
 from .config import ENV_FILE, MarketMakerSettings
 from .decision_models import TrendState
+from .drawdown_stop import DrawdownStop
 from .guard_policy import GuardPolicy
 from .metrics import MetricsCollector
 from .order_manager import OrderManager
@@ -53,6 +54,7 @@ logger = logging.getLogger(__name__)
 _POSITION_REFRESH_INTERVAL_S = 30.0
 _FUNDING_REFRESH_INTERVAL_S = 300.0
 _BALANCE_REFRESH_INTERVAL_S = 10.0
+_DRAWDOWN_CHECK_INTERVAL_S = 1.0
 
 # Default circuit-breaker settings
 _CIRCUIT_BREAKER_MAX_FAILURES = 5
@@ -119,6 +121,12 @@ class MarketMakerStrategy:
         self._trend_signal = TrendSignal(self._settings, self._ob)
         self._guards = GuardPolicy(self._settings)
         self._reprice = RepricePipeline(self._settings, self._tick_size, self._pricing)
+        self._drawdown_stop = DrawdownStop(
+            enabled=self._settings.drawdown_stop_enabled,
+            max_position_notional_usd=self._settings.max_position_notional_usd,
+            drawdown_pct_of_max_notional=self._settings.drawdown_stop_pct_of_max_notional,
+            use_high_watermark=self._settings.drawdown_use_high_watermark,
+        )
 
         # Keep legacy attribute names as aliases for one release cycle.
         self._level_pof_until = self._post_only.pof_until
@@ -128,6 +136,7 @@ class MarketMakerStrategy:
         self._level_imbalance_pause_until = self._guards._level_imbalance_pause_until
 
         self._funding_rate = Decimal("0")
+        self._shutdown_reason = "shutdown"
 
         self._shutdown_event = asyncio.Event()
 
@@ -148,7 +157,7 @@ class MarketMakerStrategy:
 
     def _handle_signal(self) -> None:
         logger.info("Signal received, initiating shutdown")
-        self._shutdown_event.set()
+        self._request_shutdown("shutdown")
 
     def _handle_reload(self) -> None:
         """SIGHUP handler — reload config from environment / .env file."""
@@ -172,6 +181,12 @@ class MarketMakerStrategy:
             self._trend_signal = TrendSignal(self._settings, self._ob)
             self._guards = GuardPolicy(self._settings)
             self._reprice = RepricePipeline(self._settings, self._tick_size, self._pricing)
+            self._drawdown_stop = DrawdownStop(
+                enabled=self._settings.drawdown_stop_enabled,
+                max_position_notional_usd=self._settings.max_position_notional_usd,
+                drawdown_pct_of_max_notional=self._settings.drawdown_stop_pct_of_max_notional,
+                use_high_watermark=self._settings.drawdown_use_high_watermark,
+            )
             self._level_pof_until = self._post_only.pof_until
             self._level_pof_streak = self._post_only.pof_streak
             self._level_pof_last_ts = self._post_only.pof_last_ts
@@ -187,6 +202,10 @@ class MarketMakerStrategy:
             )
         except Exception as exc:
             logger.error("Config reload failed: %s", exc)
+
+    @property
+    def shutdown_reason(self) -> str:
+        return self._shutdown_reason
 
     @staticmethod
     def _sanitized_run_config(settings: MarketMakerSettings) -> Dict[str, Any]:
@@ -484,6 +503,67 @@ class MarketMakerStrategy:
         if cap <= 0:
             return raw_bps
         return max(-cap, min(cap, raw_bps))
+
+    @staticmethod
+    def _counter_trend_side(trend: TrendState) -> Optional[str]:
+        if trend.direction == "BULLISH":
+            return "SELL"
+        if trend.direction == "BEARISH":
+            return "BUY"
+        return None
+
+    def _is_strong_counter_trend_side(self, side_name: str, trend: TrendState) -> bool:
+        if self._settings.market_profile != "crypto":
+            return False
+        if not self._settings.trend_one_way_enabled:
+            return False
+        if trend.strength < self._settings.trend_strong_threshold:
+            return False
+        counter_side = self._counter_trend_side(trend)
+        return counter_side is not None and side_name == counter_side
+
+    def _request_shutdown(self, reason: str) -> None:
+        if self._shutdown_event.is_set():
+            return
+        self._shutdown_reason = reason
+        self._shutdown_event.set()
+
+    def _evaluate_drawdown_stop(self) -> bool:
+        state = self._drawdown_stop.evaluate(self._risk.get_position_total_pnl())
+        if not state.triggered:
+            return False
+
+        action = "cancel_all_flatten_terminate"
+        logger.error(
+            "DRAWDOWN STOP TRIGGERED: market=%s current_pnl=%s peak_pnl=%s drawdown=%s "
+            "threshold=%s action=%s",
+            self._settings.market_name,
+            state.current_pnl,
+            state.peak_pnl,
+            state.drawdown,
+            state.threshold_usd,
+            action,
+        )
+        self._journal.record_drawdown_stop(
+            current_pnl=state.current_pnl,
+            peak_pnl=state.peak_pnl,
+            drawdown=state.drawdown,
+            threshold_usd=state.threshold_usd,
+            action=action,
+        )
+        self._request_shutdown("drawdown_stop")
+        return True
+
+    async def _drawdown_watchdog_task(self) -> None:
+        while not self._shutdown_event.is_set():
+            try:
+                if self._evaluate_drawdown_stop():
+                    return
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.error("Drawdown watchdog error", exc_info=True)
+            await asyncio.sleep(_DRAWDOWN_CHECK_INTERVAL_S)
 
     async def _funding_refresh_task(self) -> None:
         while not self._shutdown_event.is_set():
