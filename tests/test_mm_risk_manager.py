@@ -137,3 +137,41 @@ def test_handle_balance_update_refreshes_cached_available_for_trade():
         )
     )
     assert rm.get_available_for_trade() == Decimal("123.45")
+
+
+def test_reducing_order_bypasses_balance_clip_when_not_crossing_flat():
+    rm = _make_rm(
+        balance_aware_sizing_enabled=True,
+        balance_usage_factor=Decimal("1"),
+        balance_notional_multiplier=Decimal("1"),
+        balance_min_available_usd=Decimal("0"),
+    )
+    rm._cached_position = Decimal("-68")
+    rm._cached_available_for_trade = Decimal("1500")
+    allowed = rm.allowed_order_size(
+        side=OrderSide.BUY,
+        requested_size=Decimal("20"),
+        reference_price=Decimal("100"),
+        reserved_open_notional_usd=Decimal("14000"),
+    )
+    assert allowed == Decimal("20")
+
+
+def test_reducing_order_only_balance_clips_opening_remainder():
+    rm = _make_rm(
+        balance_aware_sizing_enabled=True,
+        balance_usage_factor=Decimal("1"),
+        balance_notional_multiplier=Decimal("1"),
+        balance_min_available_usd=Decimal("0"),
+    )
+    rm._cached_position = Decimal("-68")
+    rm._cached_available_for_trade = Decimal("1500")
+    allowed = rm.allowed_order_size(
+        side=OrderSide.BUY,
+        requested_size=Decimal("80"),
+        reference_price=Decimal("100"),
+        reserved_open_notional_usd=Decimal("1400"),
+    )
+    # Reducing component (68) is preserved, opening component (12) is clipped by
+    # remaining notional headroom: (1500 - 1400) / 100 = 1.
+    assert allowed == Decimal("69")

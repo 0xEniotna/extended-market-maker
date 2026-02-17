@@ -193,9 +193,15 @@ class RiskManager:
                         max(Decimal("0"), max_size_from_pos_notional),
                     )
 
+            reducing_qty, opening_qty = self._split_reducing_and_opening_qty(
+                side=side,
+                current_position=current,
+                size=clipped,
+            )
             if (
                 self._balance_aware_sizing_enabled
                 and self._cached_available_for_trade is not None
+                and opening_qty > 0
             ):
                 balance_headroom = (
                     self._cached_available_for_trade * self._balance_usage_factor
@@ -204,22 +210,30 @@ class RiskManager:
                     balance_headroom * self._balance_notional_multiplier
                 ) - reserved_open_notional_usd
                 if notional_headroom <= 0:
-                    clipped = Decimal("0")
+                    opening_qty = Decimal("0")
                 else:
                     max_size_from_balance = notional_headroom / reference_price
-                    clipped = min(
-                        clipped,
+                    opening_qty = min(
+                        opening_qty,
                         max(Decimal("0"), max_size_from_balance),
                     )
+                clipped = reducing_qty + opening_qty
 
         clipped = max(Decimal("0"), clipped)
         if clipped < requested_size:
+            reducing_qty, opening_qty = self._split_reducing_and_opening_qty(
+                side=side,
+                current_position=current,
+                size=clipped,
+            )
             logger.info(
-                "Order size clipped: side=%s requested=%s allowed=%s reserved_qty=%s reserved_notional=%s "
-                "avail_for_trade=%s ref_price=%s",
+                "Order size clipped: side=%s requested=%s allowed=%s reducing=%s opening=%s "
+                "reserved_qty=%s reserved_notional=%s avail_for_trade=%s ref_price=%s",
                 side,
                 requested_size,
                 clipped,
+                reducing_qty,
+                opening_qty,
                 reserved_same_side_qty,
                 reserved_open_notional_usd,
                 self._cached_available_for_trade,
@@ -265,3 +279,33 @@ class RiskManager:
             self._cached_equity = Decimal(str(equity))
         if initial_margin is not None:
             self._cached_initial_margin = Decimal(str(initial_margin))
+
+    @staticmethod
+    def _is_buy_side(side: OrderSide) -> bool:
+        side_name = str(side).upper()
+        return side_name == "BUY" or side_name.endswith("BUY")
+
+    @classmethod
+    def _split_reducing_and_opening_qty(
+        cls,
+        *,
+        side: OrderSide,
+        current_position: Decimal,
+        size: Decimal,
+    ) -> tuple[Decimal, Decimal]:
+        """Split order size into reducing and position-increasing components."""
+        size = max(Decimal("0"), size)
+        if size == 0 or current_position == 0:
+            return Decimal("0"), size
+
+        is_buy = cls._is_buy_side(side)
+        is_reducing = (
+            (current_position < 0 and is_buy)
+            or (current_position > 0 and not is_buy)
+        )
+        if not is_reducing:
+            return Decimal("0"), size
+
+        reducing_qty = min(abs(current_position), size)
+        opening_qty = max(Decimal("0"), size - reducing_qty)
+        return reducing_qty, opening_qty
