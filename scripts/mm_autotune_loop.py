@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 # -------------------------
 # Tuning boundaries (can be overridden by CLI flags)
@@ -127,6 +127,101 @@ class Metrics:
     post_only_reject_pct: Optional[Decimal] = None
     final_position: Optional[Decimal] = None
     last10_realized_pnl: Optional[Decimal] = None
+
+
+def _metrics_payload(metrics: Optional[Metrics]) -> Dict[str, Optional[str]]:
+    if metrics is None:
+        return {
+            "fills": None,
+            "fill_rate_pct": None,
+            "avg_edge_bps": None,
+            "avg_spread_at_fill_bps": None,
+            "avg_spread_at_place_bps": None,
+            "markout_5s_bps": None,
+            "cancellations_pct": None,
+            "rejection_pct": None,
+            "post_only_reject_pct": None,
+            "final_position": None,
+            "last10_realized_pnl": None,
+        }
+    return {
+        "fills": str(metrics.fills),
+        "fill_rate_pct": str(metrics.fill_rate_pct) if metrics.fill_rate_pct is not None else None,
+        "avg_edge_bps": str(metrics.avg_edge_bps) if metrics.avg_edge_bps is not None else None,
+        "avg_spread_at_fill_bps": (
+            str(metrics.avg_spread_at_fill_bps)
+            if metrics.avg_spread_at_fill_bps is not None
+            else None
+        ),
+        "avg_spread_at_place_bps": (
+            str(metrics.avg_spread_at_place_bps)
+            if metrics.avg_spread_at_place_bps is not None
+            else None
+        ),
+        "markout_5s_bps": str(metrics.markout_5s_bps) if metrics.markout_5s_bps is not None else None,
+        "cancellations_pct": (
+            str(metrics.cancellations_pct) if metrics.cancellations_pct is not None else None
+        ),
+        "rejection_pct": str(metrics.rejection_pct) if metrics.rejection_pct is not None else None,
+        "post_only_reject_pct": (
+            str(metrics.post_only_reject_pct)
+            if metrics.post_only_reject_pct is not None
+            else None
+        ),
+        "final_position": str(metrics.final_position) if metrics.final_position is not None else None,
+        "last10_realized_pnl": (
+            str(metrics.last10_realized_pnl)
+            if metrics.last10_realized_pnl is not None
+            else None
+        ),
+    }
+
+
+def append_config_changelog_rows(
+    *,
+    changelog_path: Path,
+    market_name: str,
+    iteration: int,
+    env_before: Path,
+    env_after: Path,
+    current_env_map: Dict[str, str],
+    updates: Dict[str, str],
+    reasons: List[str],
+    stop_reason: Optional[str],
+    run_started: float,
+    metrics_payload: Dict[str, Optional[str]],
+    analysis_file: Optional[Path],
+    tuning_log_path: Path,
+    agent: str = "autotune",
+    source: str = "mm_autotune_loop",
+) -> None:
+    if not updates:
+        return
+    ts = time.time()
+    changelog_path.parent.mkdir(parents=True, exist_ok=True)
+    rows: List[Dict[str, Any]] = []
+    for param in sorted(updates.keys()):
+        rows.append({
+            "ts": ts,
+            "market": market_name,
+            "agent": agent,
+            "source": source,
+            "iteration": iteration,
+            "env_before": str(env_before),
+            "env_after": str(env_after),
+            "param": param,
+            "old": current_env_map.get(param),
+            "new": updates[param],
+            "reasons": reasons,
+            "stop_reason": stop_reason,
+            "run_started": run_started,
+            "analysis_file": str(analysis_file) if analysis_file else None,
+            "tuning_log_file": str(tuning_log_path),
+            "trigger": metrics_payload,
+        })
+    with changelog_path.open("a") as f:
+        for row in rows:
+            f.write(json.dumps(row) + "\n")
 
 
 def _decimal(val: str) -> Optional[Decimal]:
@@ -595,6 +690,7 @@ def main() -> None:
     base_env_slug = _slugify_token(base_env.name)
     market_slug = _slugify_token(market_name)
     log_path = journal_dir / f"mm_tuning_log_{market_slug}_{base_env_slug}_{timestamp}.jsonl"
+    config_changelog_path = (repo / "data/mm_audit/config_changelog.jsonl").resolve()
 
     prev_env_file: Optional[Path] = None
 
@@ -667,6 +763,7 @@ def main() -> None:
         print(f"  Market maker stopped ({stop_reason}).")
 
         updates: Dict[str, Decimal] = {}
+        current_env_map: Dict[str, str] = {}
         reasons: List[str] = []
         if stop_reason == f"last{args.min_fills}_realized_pnl_negative" and metrics is not None:
             current_env_lines = read_env_lines(iter_env)
@@ -683,19 +780,7 @@ def main() -> None:
             "stop_reason": stop_reason,
             "updates": {k: str(v) for k, v in updates.items()},
             "reasons": reasons,
-            "metrics": {
-                "fills": metrics.fills if metrics else None,
-                "fill_rate_pct": str(metrics.fill_rate_pct) if metrics and metrics.fill_rate_pct else None,
-                "avg_edge_bps": str(metrics.avg_edge_bps) if metrics and metrics.avg_edge_bps else None,
-                "avg_spread_at_fill_bps": str(metrics.avg_spread_at_fill_bps) if metrics and metrics.avg_spread_at_fill_bps else None,
-                "avg_spread_at_place_bps": str(metrics.avg_spread_at_place_bps) if metrics and metrics.avg_spread_at_place_bps else None,
-                "markout_5s_bps": str(metrics.markout_5s_bps) if metrics and metrics.markout_5s_bps else None,
-                "cancellations_pct": str(metrics.cancellations_pct) if metrics and metrics.cancellations_pct else None,
-                "rejection_pct": str(metrics.rejection_pct) if metrics and metrics.rejection_pct else None,
-                "post_only_reject_pct": str(metrics.post_only_reject_pct) if metrics and metrics.post_only_reject_pct else None,
-                "final_position": str(metrics.final_position) if metrics and metrics.final_position else None,
-                "last10_realized_pnl": str(metrics.last10_realized_pnl) if metrics and metrics.last10_realized_pnl is not None else None,
-            },
+            "metrics": _metrics_payload(metrics),
             "run_started": run_started,
         }
         journal_dir.mkdir(parents=True, exist_ok=True)
@@ -709,6 +794,21 @@ def main() -> None:
             update_strs = {k: str(v) for k, v in updates.items()}
             next_lines = update_env_lines(next_lines, update_strs)
             next_env.write_text("\n".join(next_lines) + "\n")
+            append_config_changelog_rows(
+                changelog_path=config_changelog_path,
+                market_name=market_name,
+                iteration=i,
+                env_before=iter_env,
+                env_after=next_env,
+                current_env_map=current_env_map,
+                updates=update_strs,
+                reasons=reasons,
+                stop_reason=stop_reason,
+                run_started=run_started,
+                metrics_payload=_metrics_payload(metrics),
+                analysis_file=analysis_path,
+                tuning_log_path=log_path,
+            )
             prev_env_file = next_env
             for k, v in updates.items():
                 print(f"  {k} -> {v}")
