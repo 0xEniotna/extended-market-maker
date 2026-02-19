@@ -183,7 +183,13 @@ async def _run(args: argparse.Namespace) -> int:
             rows = resp.data or []
 
             for row in rows:
-                ts_ms = row.closed_time if row.closed_time is not None else row.created_time
+                # History endpoint also includes currently open positions with
+                # closed_time=None. Keep closed-history and open-position
+                # accounting separate to avoid double-counting.
+                if row.closed_time is None:
+                    continue
+
+                ts_ms = row.closed_time
                 if since_ms is not None and ts_ms is not None and ts_ms < since_ms:
                     continue
 
