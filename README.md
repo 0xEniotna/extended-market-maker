@@ -72,6 +72,10 @@ PYTHONPATH=src python scripts/run_market_maker.py
 - `scripts/tools/fetch_pnl.py`: account-level market PnL summary.
 - `scripts/tools/fetch_total_pnl.py`: total account PnL across all markets since a timestamp, with APR/APY.
 - `scripts/tools/analyze_mm_logs.py`: parse text logs for lifecycle and latency diagnostics.
+- `scripts/tools/market_scout_pipeline.py`: deterministic market scouting and action-pack generation.
+- `scripts/tools/auditor_apply_scout.py`: auditor decisioning (`APPROVE`/`HOLD`/`REJECT`) over scout actions.
+- `scripts/tools/auditor_followup.py`: 30-minute pending-action follow-up and escalation checks.
+- `config/market_scout_policy.yaml`: policy thresholds/guardrails for scout + auditor workflow.
 
 ## Multi-Instance Supervision
 
@@ -86,6 +90,28 @@ scripts/mm_openclaw_fleet.sh logs .env.asset
 
 Each controller monitors only its own market journal and will stop/tune/restart only that instance when degradation is detected.  
 On shutdown/restart, the runtime now attempts to flatten that market's open position (reduce-only `MARKET+IOC`) after cancelling resting orders.
+
+## Scout + Auditor Workflow
+
+Deterministic scout + auditor scripts (Discord-first, recommend-only):
+
+```bash
+cd /path/to/repo
+.venv/bin/python scripts/tools/market_scout_pipeline.py
+.venv/bin/python scripts/tools/auditor_apply_scout.py --print-target auditor
+.venv/bin/python scripts/tools/auditor_apply_scout.py --print-target mm
+.venv/bin/python scripts/tools/auditor_followup.py --print-target auditor
+.venv/bin/python scripts/tools/auditor_followup.py --print-target mm
+```
+
+Primary artifacts:
+- `data/mm_audit/scout/market_scout_report.json`
+- `data/mm_audit/scout/action_pack.json`
+- `data/mm_audit/scout/market_scout_report.md`
+- `data/mm_audit/scout/market_scout_actions.sh`
+- `data/mm_audit/auditor/auditor_decisions.jsonl`
+- `data/mm_audit/auditor/pending_actions.json`
+- `data/mm_audit/auditor/auditor_followup_log.jsonl`
 
 ## Safety Notes
 

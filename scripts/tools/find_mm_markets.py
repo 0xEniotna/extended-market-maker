@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -51,6 +53,16 @@ def _fmt(value: Optional[Decimal], places: int = 2, commas: bool = True) -> str:
     if commas:
         return f"{value:,.{places}f}"
     return f"{value:.{places}f}"
+
+
+def _to_jsonable(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_to_jsonable(v) for v in value]
+    return value
 
 
 def _vol_pct(stats: Dict[str, Any], mid: Optional[Decimal]) -> Optional[Decimal]:
@@ -308,6 +320,55 @@ def _print_table(markets: List[Dict[str, Any]], limit: int, min_spread_bps: Deci
     print("\n".join(lines))
 
 
+def _build_json_payload(
+    *,
+    markets: List[Dict[str, Any]],
+    sampled_count: int,
+    rounds: int,
+    elapsed_s: float,
+    min_samples: int,
+    args: argparse.Namespace,
+) -> Dict[str, Any]:
+    payload_markets: List[Dict[str, Any]] = []
+    for market in markets:
+        payload_markets.append({
+            "name": market.get("name"),
+            "asset_name": market.get("asset_name"),
+            "samples": market.get("_samples"),
+            "coverage_pct": market.get("_coverage_pct"),
+            "spread_median_bps": market.get("_spread_median_bps"),
+            "spread_p90_bps": market.get("_spread_p90_bps"),
+            "spread_mean_bps": market.get("_spread_mean_bps"),
+            "vol_pct": market.get("_vol_pct"),
+            "open_interest": market.get("_open_interest"),
+            "daily_volume": market.get("_daily_volume"),
+            "bid": market.get("_bid"),
+            "ask": market.get("_ask"),
+        })
+
+    return {
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "sampling": {
+            "duration_s": args.duration_s,
+            "interval_s": args.interval_s,
+            "rounds": rounds,
+            "elapsed_s": elapsed_s,
+            "sampled_markets": sampled_count,
+        },
+        "filters": {
+            "min_spread_bps": args.min_spread_bps,
+            "max_spread_bps": args.max_spread_bps,
+            "min_coverage_pct": args.min_coverage_pct,
+            "max_vol_pct": args.max_vol_pct,
+            "min_daily_volume": args.min_daily_volume,
+            "min_samples": min_samples,
+            "sort_by": args.sort_by,
+        },
+        "matched_markets": len(payload_markets),
+        "markets": payload_markets,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -375,6 +436,16 @@ def main() -> int:
         default=None,
         help="Override API base URL (e.g. https://api.starknet.extended.exchange/api/v1)",
     )
+    parser.add_argument(
+        "--json-out",
+        default=None,
+        help="Optional path to write structured JSON output.",
+    )
+    parser.add_argument(
+        "--json-stdout",
+        action="store_true",
+        help="Print structured JSON payload to stdout.",
+    )
     args = parser.parse_args()
 
     load_dotenv()
@@ -391,6 +462,22 @@ def main() -> int:
     )
     if rounds == 0:
         print("No successful market snapshots collected.")
+        if args.json_out or args.json_stdout:
+            payload = _build_json_payload(
+                markets=[],
+                sampled_count=0,
+                rounds=0,
+                elapsed_s=elapsed_s,
+                min_samples=max(1, args.min_samples),
+                args=args,
+            )
+            json_text = json.dumps(_to_jsonable(payload), indent=2) + "\n"
+            if args.json_out:
+                out_path = Path(args.json_out)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(json_text)
+            if args.json_stdout:
+                print(json_text, end="")
         return 1
 
     min_samples = args.min_samples if args.min_samples > 0 else max(1, int(rounds * 0.6))
@@ -430,6 +517,23 @@ def main() -> int:
     )
     print(f"Matched markets: {len(filtered)} / sampled_markets={len(sampled)}")
     _print_table(filtered, args.limit, args.min_spread_bps)
+
+    if args.json_out or args.json_stdout:
+        payload = _build_json_payload(
+            markets=filtered,
+            sampled_count=len(sampled),
+            rounds=rounds,
+            elapsed_s=elapsed_s,
+            min_samples=min_samples,
+            args=args,
+        )
+        json_text = json.dumps(_to_jsonable(payload), indent=2) + "\n"
+        if args.json_out:
+            out_path = Path(args.json_out)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(json_text)
+        if args.json_stdout:
+            print(json_text, end="")
 
     return 0
 

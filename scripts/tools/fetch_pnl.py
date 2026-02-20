@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Optional
@@ -72,6 +74,16 @@ def _to_ms(days: Optional[float]) -> Optional[int]:
 def _ensure_ok(resp, label: str) -> None:
     if resp.status != ResponseStatus.OK:
         raise RuntimeError(f"{label} failed: status={resp.status} error={resp.error}")
+
+
+def _to_jsonable(value):
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_to_jsonable(v) for v in value]
+    return value
 
 
 async def _resolve_market_name(
@@ -223,6 +235,36 @@ async def _run(args: argparse.Namespace) -> int:
         await client.close()
 
     overall = stats.realized_total + open_realized + open_unrealized
+    payload = {
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "market": market,
+        "environment": settings.environment.value,
+        "window_days": args.days,
+        "closed_positions": {
+            "count": stats.count,
+            "wins": stats.wins,
+            "losses": stats.losses,
+            "realized_pnl_usd": stats.realized_total,
+            "trade_pnl_usd": stats.trade_pnl_total,
+            "funding_fees_usd": stats.funding_fees_total,
+            "open_fees_usd": stats.open_fees_total,
+            "close_fees_usd": stats.close_fees_total,
+            "first_close_ms": stats.first_ts,
+            "last_close_ms": stats.last_ts,
+        },
+        "open_positions": {
+            "net_size": net_open_size,
+            "notional_usd": open_notional,
+            "realized_component_usd": open_realized,
+            "unrealized_component_usd": open_unrealized,
+        },
+        "totals": {
+            "closed_realized_pnl_usd": stats.realized_total,
+            "open_realized_pnl_usd": open_realized,
+            "open_unrealized_pnl_usd": open_unrealized,
+            "total_pnl_including_open_usd": overall,
+        },
+    }
 
     print(f"PnL summary for {market}")
     print(f"Environment: {settings.environment.value}")
@@ -253,6 +295,12 @@ async def _run(args: argparse.Namespace) -> int:
         f"{_fmt_decimal(overall)} USD "
         "(closed_realized + open_realized + open_unrealized)"
     )
+    if args.json_out:
+        json_path = Path(args.json_out)
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        json_path.write_text(json.dumps(_to_jsonable(payload), indent=2) + "\n")
+    if args.json_stdout:
+        print(json.dumps(_to_jsonable(payload), indent=2))
     return 0
 
 
@@ -288,6 +336,16 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=100,
         help="Safety cap on history pages to fetch (default: 100).",
+    )
+    parser.add_argument(
+        "--json-out",
+        default=None,
+        help="Optional path to write structured JSON summary.",
+    )
+    parser.add_argument(
+        "--json-stdout",
+        action="store_true",
+        help="Print structured JSON summary to stdout.",
     )
     return parser.parse_args()
 

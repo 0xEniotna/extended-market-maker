@@ -1,0 +1,33 @@
+{
+  "candidate_gates": {
+    "min_spread_bps": 6,
+    "max_spread_bps": 40,
+    "max_spread_p90_bps": 60,
+    "min_coverage_pct": 85,
+    "min_ticks_in_spread": 4,
+    "min_daily_volume": 200000,
+    "min_score": 12.5
+  },
+  "rotation": {
+    "min_score_delta": 1.5,
+    "underperformance_cycles": 2
+  },
+  "underperformance": {
+    "pnl_24h_lt": 0,
+    "markout_5s_lte": -0.5,
+    "fill_rate_pct_lt": 0.5
+  },
+  "launch": {
+    "max_new_per_day": 4,
+    "max_new_per_run": 2,
+    "max_total_live_markets": null,
+    "launch_size_multiplier": 0.25,
+    "warmup_hours": 6
+  },
+  "freshness": {
+    "scout_max_age_minutes": 15
+  },
+  "followup": {
+    "escalation_minutes": 30
+  }
+}

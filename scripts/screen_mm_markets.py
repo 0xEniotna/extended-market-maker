@@ -11,9 +11,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import sys
 import time
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -58,6 +60,16 @@ def _percentile(values: list[Decimal], pct: Decimal) -> Decimal:
         return ordered[lo]
     weight = Decimal(str(rank - lo))
     return ordered[lo] + (ordered[hi] - ordered[lo]) * weight
+
+
+def _to_jsonable(value):
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_to_jsonable(v) for v in value]
+    return value
 
 
 def screen_markets(
@@ -246,6 +258,20 @@ def score_market(m: dict) -> Decimal:
     return Decimal(str(round(total, 2)))
 
 
+def _build_json_payload(markets: list[dict], args, rounds: int, elapsed_s: float) -> dict:
+    return {
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "sampling": {
+            "duration_s": args.duration_s,
+            "interval_s": args.interval_s,
+            "rounds": rounds,
+            "elapsed_s": elapsed_s,
+        },
+        "count": len(markets),
+        "markets": markets,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Screen MM markets using rolling spread sampling.",
@@ -273,6 +299,16 @@ def main() -> None:
         default=None,
         help="Override API base URL",
     )
+    parser.add_argument(
+        "--json-out",
+        default=None,
+        help="Optional path to write structured JSON output.",
+    )
+    parser.add_argument(
+        "--json-stdout",
+        action="store_true",
+        help="Print structured JSON payload to stdout.",
+    )
     args = parser.parse_args()
 
     markets, rounds, elapsed_s = screen_markets(
@@ -282,6 +318,15 @@ def main() -> None:
     )
     if not markets:
         print("No active markets found.")
+        if args.json_out or args.json_stdout:
+            payload = _build_json_payload([], args, rounds, elapsed_s)
+            json_text = json.dumps(_to_jsonable(payload), indent=2) + "\n"
+            if args.json_out:
+                out_path = Path(args.json_out)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(json_text)
+            if args.json_stdout:
+                print(json_text, end="")
         return
 
     for m in markets:
@@ -333,6 +378,37 @@ def main() -> None:
     print("  Tks/Sprd  — median ticks fitting in the spread")
     print("  MinNotl   — minimum order notional in USD")
     print("  Score     — composite MM suitability (higher = better)")
+
+    payload_markets = []
+    for m in markets:
+        payload_markets.append({
+            "name": m["name"],
+            "n_samples": m["n_samples"],
+            "mid": m["mid"],
+            "bid": m["bid"],
+            "ask": m["ask"],
+            "spread_bps": m["spread_bps"],
+            "spread_bps_p90": m["spread_bps_p90"],
+            "spread_bps_mean": m["spread_bps_mean"],
+            "coverage_3bps_pct": m["coverage_3bps_pct"],
+            "tick_bps": m["tick_bps"],
+            "ticks_in_spread": m["ticks_in_spread"],
+            "tick": m["tick"],
+            "min_size": m["min_size"],
+            "min_size_change": m["min_size_change"],
+            "min_notional": m["min_notional"],
+            "daily_vol": m["daily_vol"],
+            "oi": m["oi"],
+            "score": m["score"],
+        })
+    payload = _build_json_payload(payload_markets, args, rounds, elapsed_s)
+    json_text = json.dumps(_to_jsonable(payload), indent=2) + "\n"
+    if args.json_out:
+        out_path = Path(args.json_out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json_text)
+    if args.json_stdout:
+        print(json_text, end="")
 
     out = PROJECT_ROOT / "data" / "mm_market_screen.txt"
     out.parent.mkdir(parents=True, exist_ok=True)

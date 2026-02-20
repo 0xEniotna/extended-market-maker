@@ -261,6 +261,92 @@ def _format_avg(values: List[Decimal]) -> str:
         return "n/a"
     return f"{(sum(values) / Decimal(len(values))):.2f}"
 
+
+def _avg(values: List[Decimal]) -> Optional[Decimal]:
+    if not values:
+        return None
+    return sum(values) / Decimal(len(values))
+
+
+def _to_jsonable(v: Any) -> Any:
+    if isinstance(v, Decimal):
+        return str(v)
+    if isinstance(v, dict):
+        return {k: _to_jsonable(val) for k, val in v.items()}
+    if isinstance(v, list):
+        return [_to_jsonable(x) for x in v]
+    return v
+
+
+def build_summary(
+    events: List[Dict[str, Any]],
+    path: Path,
+    assumed_fee_bps: Optional[Decimal],
+) -> Dict[str, Any]:
+    fills = [e for e in events if e.get("type") == "fill"]
+    orders = [e for e in events if e.get("type") == "order_placed"]
+    snapshots = [e for e in events if e.get("type") == "snapshot"]
+    ts_values, mid_values = _build_mid_series(events)
+
+    market = events[0].get("market", "?") if events else "?"
+    start_ts = float(events[0].get("ts", 0.0)) if events else None
+    end_ts = float(events[-1].get("ts", 0.0)) if events else None
+    duration_s = (end_ts - start_ts) if (start_ts is not None and end_ts is not None) else 0.0
+
+    edge_values = [_d(f.get("edge_bps")) for f in fills if f.get("edge_bps") is not None]
+    adverse_fill_count = sum(1 for v in edge_values if v < 0)
+    adverse_fill_ratio = (
+        Decimal(adverse_fill_count) / Decimal(len(edge_values))
+        if edge_values
+        else None
+    )
+
+    markout_values: Dict[int, List[Decimal]] = {1: [], 5: [], 30: []}
+    for fill in fills:
+        for horizon in markout_values.keys():
+            m = _markout_for_fill(fill, float(horizon), ts_values, mid_values)
+            if m is not None:
+                markout_values[horizon].append(m)
+
+    fill_rate_pct = None
+    if orders:
+        fill_rate_pct = Decimal(len(fills)) / Decimal(len(orders)) * Decimal("100")
+
+    return {
+        "market": market,
+        "journal_file": str(path),
+        "assumed_fee_bps": assumed_fee_bps,
+        "counts": {
+            "events": len(events),
+            "fills": len(fills),
+            "orders": len(orders),
+            "snapshots": len(snapshots),
+        },
+        "window": {
+            "start_ts": start_ts,
+            "end_ts": end_ts,
+            "start_iso": _ts_fmt(start_ts) if start_ts is not None else None,
+            "end_iso": _ts_fmt(end_ts) if end_ts is not None else None,
+            "duration_s": duration_s,
+        },
+        "metrics": {
+            "fill_rate_pct": fill_rate_pct,
+            "avg_edge_bps": _avg(edge_values),
+            "adverse_fill_count": adverse_fill_count,
+            "adverse_fill_ratio": adverse_fill_ratio,
+            "final_position": _latest_position(events),
+            "markout_1s_bps": _avg(markout_values[1]),
+            "markout_5s_bps": _avg(markout_values[5]),
+            "markout_30s_bps": _avg(markout_values[30]),
+            "markout_counts": {
+                "1s": len(markout_values[1]),
+                "5s": len(markout_values[5]),
+                "30s": len(markout_values[30]),
+            },
+        },
+    }
+
+
 def analyse(events: List[Dict[str, Any]], path: Path, assumed_fee_bps: Optional[Decimal]) -> str:
     fills = [e for e in events if e["type"] == "fill"]
     orders = [e for e in events if e["type"] == "order_placed"]
@@ -765,6 +851,11 @@ def main() -> None:
         default=None,
         help="Optional fee assumption per side in bps for stress-testing net MTM P&L",
     )
+    parser.add_argument(
+        "--json-out",
+        default=None,
+        help="Optional path to write structured JSON summary.",
+    )
     args = parser.parse_args()
 
     target = Path(args.target)
@@ -780,6 +871,12 @@ def main() -> None:
     report_path = target.with_suffix(".analysis.txt")
     report_path.write_text(report)
     print(f"\nReport saved to: {report_path}")
+    if args.json_out:
+        summary = build_summary(events, target, args.assumed_fee_bps)
+        json_path = Path(args.json_out)
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        json_path.write_text(json.dumps(_to_jsonable(summary), indent=2) + "\n")
+        print(f"JSON summary saved to: {json_path}")
 
 
 if __name__ == "__main__":

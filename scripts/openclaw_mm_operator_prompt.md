@@ -13,10 +13,10 @@ Continuously monitor all configured MM instances.
 If one instance degrades, stop only that instance, ensure its open position is flattened, tune only allowed keys, and restart only that instance.
 
 ## Runtime commands (fleet)
-- Start fleet: `cd <repo-root> && scripts/mm_openclaw_fleet.sh start .env.asset `
-- Stop fleet: `cd <repo-root> && scripts/mm_openclaw_fleet.sh stop .env.asset `
-- Status: `cd <repo-root> && scripts/mm_openclaw_fleet.sh status .env.asset `
-- Logs: `cd <repo-root> && scripts/mm_openclaw_fleet.sh logs .env.asset`
+- Start fleet: `cd <repo-root> && scripts/mm_openclaw_fleet.sh start .env.amzn .env.mon .env.pump`
+- Stop fleet: `cd <repo-root> && scripts/mm_openclaw_fleet.sh stop .env.amzn .env.mon .env.pump`
+- Status: `cd <repo-root> && scripts/mm_openclaw_fleet.sh status .env.amzn .env.mon .env.pump`
+- Logs: `cd <repo-root> && scripts/mm_openclaw_fleet.sh logs .env.amzn .env.mon .env.pump`
 
 ## Analysis command
 Use:
