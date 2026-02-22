@@ -748,6 +748,16 @@ class MarketMakerSettings(BaseSettings):
             "Depth of orderbook levels captured in per-fill market snapshots."
         ),
     )
+    journal_max_size_mb: float = Field(
+        default=50.0,
+        ge=0,
+        le=1000,
+        description=(
+            "Maximum journal file size in MB before rotation. "
+            "When exceeded, the current file is closed and a new one opened "
+            "with an incremented suffix. A 'latest' symlink is maintained."
+        ),
+    )
 
     # --- Helpers ---
 

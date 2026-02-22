@@ -139,19 +139,49 @@ class MarketMakerStrategy:
     def _handle_reload(self) -> None:
         """SIGHUP handler — reload config from environment / .env file."""
         try:
+            old_config = self._sanitized_run_config(self._settings)
             new_settings = MarketMakerSettings()
+            new_config = self._sanitized_run_config(new_settings)
+
+            # Compute diff: keys where values changed.
+            diff: Dict[str, Any] = {}
+            all_keys = set(old_config) | set(new_config)
+            for key in all_keys:
+                old_val = old_config.get(key)
+                new_val = new_config.get(key)
+                if str(old_val) != str(new_val):
+                    diff[key] = {"before": old_val, "after": new_val}
+
             self._settings = new_settings
             self._rebuild_components()
+
+            # Journal the config change event.
+            if hasattr(self, "_journal") and self._journal is not None:
+                self._journal.record_config_change(
+                    before=old_config,
+                    after=new_config,
+                    diff=diff,
+                )
+
             logger.info(
-                "Config reloaded: offset_mode=%s skew=%.2f spread_min=%s levels=%d max_age=%ss",
+                "Config reloaded: offset_mode=%s skew=%.2f spread_min=%s levels=%d max_age=%ss diff_keys=%s",
                 new_settings.offset_mode.value,
                 new_settings.inventory_skew_factor,
                 new_settings.min_spread_bps,
                 new_settings.num_price_levels,
                 new_settings.max_order_age_s,
+                list(diff.keys()) if diff else "none",
             )
         except Exception as exc:
             logger.error("Config reload failed: %s", exc)
+            if hasattr(self, "_journal") and self._journal is not None:
+                self._journal.record_error(
+                    component="config_reload",
+                    exception_type=type(exc).__name__,
+                    message=str(exc),
+                    stack_trace_hash=TradeJournal.make_stack_trace_hash(exc),
+                    stack_trace=TradeJournal.format_stack_trace(exc),
+                )
 
     @property
     def shutdown_reason(self) -> str:
@@ -265,6 +295,13 @@ class MarketMakerStrategy:
                 logger.error(
                     "Error in level task %s L%d: %s", side, level, exc,
                     exc_info=True,
+                )
+                self._journal.record_error(
+                    component=f"level_task_{side}_L{level}",
+                    exception_type=type(exc).__name__,
+                    message=str(exc),
+                    stack_trace_hash=TradeJournal.make_stack_trace_hash(exc),
+                    stack_trace=TradeJournal.format_stack_trace(exc),
                 )
                 await asyncio.sleep(1.0)
 
@@ -634,8 +671,14 @@ class MarketMakerStrategy:
                     return
             except asyncio.CancelledError:
                 return
-            except Exception:
+            except Exception as exc:
                 logger.error("Drawdown watchdog error", exc_info=True)
+                self._journal.record_error(
+                    component="drawdown_watchdog",
+                    exception_type=type(exc).__name__,
+                    message=str(exc),
+                    stack_trace_hash=TradeJournal.make_stack_trace_hash(exc),
+                )
             await asyncio.sleep(_DRAWDOWN_CHECK_INTERVAL_S)
 
     async def _funding_refresh_task(self) -> None:
@@ -773,6 +816,12 @@ class MarketMakerStrategy:
                 return
             except Exception as exc:
                 logger.error("Position refresh error: %s", exc)
+                self._journal.record_error(
+                    component="position_refresh",
+                    exception_type=type(exc).__name__,
+                    message=str(exc),
+                    stack_trace_hash=TradeJournal.make_stack_trace_hash(exc),
+                )
             await asyncio.sleep(_POSITION_REFRESH_INTERVAL_S)
 
     # ------------------------------------------------------------------
@@ -848,4 +897,10 @@ class MarketMakerStrategy:
                 return
             except Exception as exc:
                 logger.error("Circuit breaker task error: %s", exc)
+                self._journal.record_error(
+                    component="circuit_breaker",
+                    exception_type=type(exc).__name__,
+                    message=str(exc),
+                    stack_trace_hash=TradeJournal.make_stack_trace_hash(exc),
+                )
                 await asyncio.sleep(1.0)

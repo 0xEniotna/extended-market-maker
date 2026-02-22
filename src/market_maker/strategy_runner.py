@@ -186,7 +186,12 @@ def _build_runtime_context(
     account_stream = AccountStreamManager(
         settings.endpoint_config, settings.api_key, settings.market_name
     )
-    journal = TradeJournal(settings.market_name, run_id=uuid.uuid4().hex, schema_version=2)
+    journal = TradeJournal(
+        settings.market_name,
+        run_id=uuid.uuid4().hex,
+        schema_version=2,
+        max_size_mb=settings.journal_max_size_mb,
+    )
     metrics = MetricsCollector(
         orderbook_mgr=ob_mgr,
         order_mgr=order_mgr,
@@ -375,8 +380,27 @@ def _create_tasks(ctx: RuntimeContext) -> list[asyncio.Task]:
     tasks.append(asyncio.create_task(ctx.strategy._circuit_breaker_task(), name="mm-circuit-breaker"))
     tasks.append(asyncio.create_task(ctx.strategy._funding_refresh_task(), name="mm-funding-refresh"))
     tasks.append(asyncio.create_task(ctx.strategy._drawdown_watchdog_task(), name="mm-drawdown-watchdog"))
+    tasks.append(asyncio.create_task(_heartbeat_task(ctx), name="mm-heartbeat"))
     logger.info("Market maker running with %d tasks", len(tasks))
     return tasks
+
+
+async def _heartbeat_task(ctx: RuntimeContext) -> None:
+    """Emit a heartbeat journal event every 30 seconds."""
+    start_ts = time.monotonic()
+    while True:
+        try:
+            await asyncio.sleep(30.0)
+            ctx.journal.record_heartbeat(
+                position=ctx.risk_mgr.get_current_position(),
+                event_count=ctx.journal.event_count,
+                active_orders=ctx.order_mgr.active_order_count(),
+                uptime_s=time.monotonic() - start_ts,
+            )
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            logger.error("Heartbeat error: %s", exc)
 
 
 async def _cancel_tasks(tasks: list[asyncio.Task]) -> None:
