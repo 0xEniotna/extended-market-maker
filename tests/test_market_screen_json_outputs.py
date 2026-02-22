@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import sys
 from decimal import Decimal
 from pathlib import Path
@@ -72,3 +73,9 @@ def test_screen_build_json_payload_count():
     )
     assert payload["count"] == 1
     assert payload["sampling"]["rounds"] == 80
+
+
+def test_screen_module_import_does_not_mutate_mm_environment():
+    os.environ["MM_MARKET_PROFILE"] = "legacy"
+    _ = _load_module(Path("scripts/screen_mm_markets.py"), "screen_mm_markets_side_effect_mod")
+    assert os.environ["MM_MARKET_PROFILE"] == "legacy"

@@ -38,3 +38,13 @@ class PricingContext:
     trend: TrendState
     inventory_norm: Decimal
     funding_bias_bps: Decimal = Decimal("0")
+
+
+@dataclass(frozen=True)
+class RepriceMarketContext:
+    regime: RegimeState
+    trend: TrendState
+    min_reprice_interval_s: float
+    max_order_age_s: float
+    funding_bias_bps: Decimal
+    inventory_band: str

@@ -19,6 +19,7 @@ Usage:
 
 Inputs:
   - Pass env files as positional args (e.g. .env.amzn .env.pump)
+  - Shorthand is accepted (e.g. amzn, AMZN-USD -> .env.amzn)
   - Or set ENV_LIST as comma-separated env files
   - If neither is provided, defaults to .env.cop
 
@@ -62,6 +63,29 @@ resolve_env_path() {
   fi
 }
 
+normalize_env_label() {
+  local raw
+  raw="$(trim "$1")"
+  if [[ -z "${raw}" ]]; then
+    echo ""
+    return
+  fi
+
+  # Keep explicit paths / filenames unchanged.
+  if [[ "${raw}" = /* || "${raw}" == .env* || "${raw}" == */* ]]; then
+    echo "${raw}"
+    return
+  fi
+
+  # Accept market shorthand like "AZTEC-USD" and plain aliases like "aztec".
+  local lowered
+  lowered="$(printf '%s' "${raw}" | tr '[:upper:]' '[:lower:]')"
+  if [[ "${lowered}" == *-usd ]]; then
+    lowered="${lowered%-usd}"
+  fi
+  echo ".env.${lowered}"
+}
+
 action="${1:-}"
 case "${action}" in
   start|stop|restart|status|logs)
@@ -92,6 +116,15 @@ if [[ "${#envs[@]}" -eq 0 ]]; then
   echo "No env files provided."
   exit 1
 fi
+
+declare -a normalized_envs=()
+for env_label in "${envs[@]}"; do
+  normalized="$(normalize_env_label "${env_label}")"
+  if [[ -n "${normalized}" ]]; then
+    normalized_envs+=("${normalized}")
+  fi
+done
+envs=("${normalized_envs[@]}")
 
 if [[ "${action}" == "logs" ]]; then
   mkdir -p "${JOURNAL_DIR}"

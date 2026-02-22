@@ -103,7 +103,7 @@ class MetricsCollector:
             best_bid=bid.price if bid else None,
             best_ask=ask.price if ask else None,
             spread_bps=self._ob.spread_bps(),
-            active_orders=len(self._orders.get_active_orders()),
+            active_orders=self._orders.active_order_count(),
             total_fills=m.fills,
             total_cancellations=m.cancellations,
             total_rejections=m.rejections,

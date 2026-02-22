@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import math
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
+from typing import Optional, cast
+
+from .types import OrderbookLike, PriceLevelLike, PricingSettingsLike, RiskManagerLike
 
 
 class PricingEngine:
@@ -9,21 +12,35 @@ class PricingEngine:
 
     def __init__(
         self,
-        settings,
-        orderbook_mgr,
-        risk_mgr,
+        settings: object,
+        orderbook_mgr: object,
+        risk_mgr: RiskManagerLike,
         tick_size: Decimal,
         base_order_size: Decimal,
         min_order_size_step: Decimal,
     ) -> None:
-        self._settings = settings
-        self._ob = orderbook_mgr
+        self._settings = cast(PricingSettingsLike, settings)
+        self._ob = cast(OrderbookLike, orderbook_mgr)
         self._risk = risk_mgr
         self._tick_size = tick_size
         self._base_order_size = base_order_size
         self._min_order_size_step = min_order_size_step
 
-    def round_to_tick(self, price: Decimal, side=None) -> Decimal:
+    @staticmethod
+    def _to_decimal(value, default: str = "0") -> Decimal:
+        try:
+            return Decimal(str(value))
+        except Exception:
+            return Decimal(default)
+
+    def _offset_mode(self) -> str:
+        mode = self._settings.offset_mode
+        if isinstance(mode, str):
+            return mode
+        value = getattr(mode, "value", mode)
+        return str(value)
+
+    def round_to_tick(self, price: Decimal, side: Optional[object] = None) -> Decimal:
         if self._tick_size <= 0:
             return price
         side_name = str(side)
@@ -42,23 +59,23 @@ class PricingEngine:
         _100 = Decimal("100")
         _10000 = Decimal("10000")
 
-        if self._settings.offset_mode.value == "dynamic":
+        if self._offset_mode() == "dynamic":
             spread_bps = self._ob.spread_bps_ema()
             if spread_bps is None or spread_bps <= 0:
                 spread_bps = self._settings.min_offset_bps
 
-            per_level_bps = spread_bps * self._settings.spread_multiplier * (level + 1)
-            floor = self._settings.min_offset_bps * (level + 1)
-            ceiling = self._settings.max_offset_bps * (level + 1)
+            per_level_bps = spread_bps * self._settings.spread_multiplier * Decimal(level + 1)
+            floor = self._settings.min_offset_bps * Decimal(level + 1)
+            ceiling = self._settings.max_offset_bps * Decimal(level + 1)
             per_level_bps = max(floor, min(per_level_bps, ceiling))
             per_level_bps *= max(Decimal("0"), regime_scale)
             return best_price * per_level_bps / _10000
 
-        offset_pct = self._settings.price_offset_per_level_percent * (level + 1)
+        offset_pct = self._settings.price_offset_per_level_percent * Decimal(level + 1)
         return best_price * offset_pct / _100
 
     def inventory_norm(self) -> Decimal:
-        max_pos = self._settings.max_position_size
+        max_pos = self._to_decimal(self._settings.max_position_size)
         if max_pos > 0:
             val = self._risk.get_current_position() / max_pos
         else:
@@ -67,17 +84,20 @@ class PricingEngine:
 
     def inventory_band(self) -> str:
         abs_norm = abs(self.inventory_norm())
-        if abs_norm >= self._settings.inventory_hard_pct:
+        if abs_norm >= self._to_decimal(self._settings.inventory_hard_pct):
             return "HARD"
-        if abs_norm >= self._settings.inventory_critical_pct:
+        if abs_norm >= self._to_decimal(self._settings.inventory_critical_pct):
             return "CRITICAL"
-        if abs_norm >= self._settings.inventory_warn_pct:
+        if abs_norm >= self._to_decimal(self._settings.inventory_warn_pct):
             return "WARN"
         return "NORMAL"
 
     def _skew_component(self, trend=None) -> Decimal:
         skew_norm = self.inventory_norm()
-        deadband = max(Decimal("0"), min(Decimal("1"), self._settings.inventory_deadband_pct))
+        deadband = max(
+            Decimal("0"),
+            min(Decimal("1"), self._to_decimal(self._settings.inventory_deadband_pct)),
+        )
         abs_norm = abs(skew_norm)
         if abs_norm <= deadband:
             shaped = Decimal("0")
@@ -87,7 +107,7 @@ class PricingEngine:
             else:
                 normalized = (abs_norm - deadband) / (Decimal("1") - deadband)
             sign = Decimal("1") if skew_norm >= 0 else Decimal("-1")
-            shape_k = float(max(Decimal("0"), self._settings.skew_shape_k))
+            shape_k = float(max(Decimal("0"), self._to_decimal(self._settings.skew_shape_k)))
             if shape_k == 0:
                 curve = float(normalized)
             else:
@@ -95,11 +115,13 @@ class PricingEngine:
                 curve = 0.0 if denom == 0 else math.tanh(shape_k * float(normalized)) / denom
             shaped = sign * Decimal(str(curve))
 
-        max_skew_bps = self._settings.skew_max_bps * self._settings.inventory_skew_factor
+        max_skew_bps = self._to_decimal(self._settings.skew_max_bps) * self._to_decimal(
+            self._settings.inventory_skew_factor
+        )
         if trend is not None and self._settings.market_profile == "crypto":
             max_skew_bps *= (
                 Decimal("1")
-                + (self._settings.trend_skew_boost - Decimal("1")) * trend.strength
+                + (self._to_decimal(self._settings.trend_skew_boost) - Decimal("1")) * trend.strength
             )
         if self.inventory_band() in {"WARN", "CRITICAL", "HARD"}:
             max_skew_bps *= Decimal("1.25")
@@ -107,7 +129,7 @@ class PricingEngine:
 
     def compute_target_price(
         self,
-        side,
+        side: object,
         level: int,
         best_price: Decimal,
         *,
@@ -130,8 +152,8 @@ class PricingEngine:
         else:
             raw = best_price + offset - skew_offset - funding_offset
 
-        bid = self._ob.best_bid()
-        ask = self._ob.best_ask()
+        bid = cast(Optional[PriceLevelLike], self._ob.best_bid())
+        ask = cast(Optional[PriceLevelLike], self._ob.best_ask())
         if bid is not None and ask is not None:
             if (side_name.endswith("BUY") or side_name == "BUY") and raw >= ask.price:
                 raw = ask.price - self._tick_size
@@ -140,7 +162,7 @@ class PricingEngine:
 
         return self.round_to_tick(raw, side)
 
-    def theoretical_edge_bps(self, side, quote_price: Decimal, current_best: Decimal) -> Decimal:
+    def theoretical_edge_bps(self, side: object, quote_price: Decimal, current_best: Decimal) -> Decimal:
         if current_best <= 0:
             return Decimal("0")
         side_name = str(side)
@@ -149,7 +171,7 @@ class PricingEngine:
         return (quote_price - current_best) / current_best * Decimal("10000")
 
     def level_size(self, level: int) -> Decimal:
-        scale = self._settings.size_scale_per_level
+        scale = self._to_decimal(self._settings.size_scale_per_level, default="1")
         if scale == 1 or level == 0:
             return self._base_order_size
         return (self._base_order_size * scale ** level).quantize(

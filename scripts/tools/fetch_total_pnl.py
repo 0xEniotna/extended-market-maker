@@ -133,9 +133,15 @@ def _annualized_returns(
 async def _run(args: argparse.Namespace) -> int:
     since_ms = _parse_since_timestamp(args.since)
     now_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
-    if since_ms >= now_ms:
+    until_ms = _parse_since_timestamp(args.until) if args.until else now_ms
+    if until_ms > now_ms:
+        raise RuntimeError("`--until` must be earlier than current time")
+    if since_ms >= until_ms:
+        if args.until:
+            raise RuntimeError("`--since` must be earlier than `--until`")
         raise RuntimeError("`--since` must be earlier than current time")
-    period_days = Decimal(now_ms - since_ms) / _MS_PER_DAY
+    period_days = Decimal(until_ms - since_ms) / _MS_PER_DAY
+    historical_until = args.until is not None and until_ms < now_ms
 
     if args.env:
         env_file = _resolve_env_file(args.env)
@@ -202,7 +208,7 @@ async def _run(args: argparse.Namespace) -> int:
                     continue
 
                 ts_ms = row.closed_time
-                if ts_ms is None or ts_ms < since_ms:
+                if ts_ms is None or ts_ms < since_ms or ts_ms > until_ms:
                     continue
 
                 market = str(row.market).upper()
@@ -223,39 +229,42 @@ async def _run(args: argparse.Namespace) -> int:
             seen_cursors.add(next_cursor)
             cursor = next_cursor
 
-        pos_resp = await client.account.get_positions(market_names=None)
-        _ensure_ok(pos_resp, "get_positions")
-        positions = pos_resp.data or []
+        if not historical_until:
+            pos_resp = await client.account.get_positions(market_names=None)
+            _ensure_ok(pos_resp, "get_positions")
+            positions = pos_resp.data or []
 
-        for pos in positions:
-            created_at = getattr(pos, "created_at", None)
-            if (
-                created_at is not None
-                and created_at < since_ms
-                and not args.include_preexisting_open
-            ):
-                open_count_skipped_preexisting += 1
-                continue
+            for pos in positions:
+                created_at = getattr(pos, "created_at", None)
+                if (
+                    created_at is not None
+                    and created_at < since_ms
+                    and not args.include_preexisting_open
+                ):
+                    open_count_skipped_preexisting += 1
+                    continue
+                if created_at is not None and created_at > until_ms:
+                    continue
 
-            market = str(pos.market).upper()
-            realized = Decimal(str(pos.realised_pnl))
-            unrealized = Decimal(str(pos.unrealised_pnl))
-            value = Decimal(str(pos.value))
-            sign = Decimal("1") if pos.side == PositionSide.LONG else Decimal("-1")
+                market = str(pos.market).upper()
+                realized = Decimal(str(pos.realised_pnl))
+                unrealized = Decimal(str(pos.unrealised_pnl))
+                value = Decimal(str(pos.value))
+                sign = Decimal("1") if pos.side == PositionSide.LONG else Decimal("-1")
 
-            open_count_included += 1
-            open_realized_total += realized
-            open_unrealized_total += unrealized
-            open_notional_total += value
-            net_open_size_total += sign * Decimal(str(pos.size))
+                open_count_included += 1
+                open_realized_total += realized
+                open_unrealized_total += unrealized
+                open_notional_total += value
+                net_open_size_total += sign * Decimal(str(pos.size))
 
-            per_market_open_realized[market] += realized
-            per_market_open_unrealized[market] += unrealized
+                per_market_open_realized[market] += realized
+                per_market_open_unrealized[market] += unrealized
 
-        bal_resp = await client.account.get_balance()
-        _ensure_ok(bal_resp, "get_balance")
-        if bal_resp.data is not None:
-            current_equity = Decimal(str(bal_resp.data.equity))
+            bal_resp = await client.account.get_balance()
+            _ensure_ok(bal_resp, "get_balance")
+            if bal_resp.data is not None:
+                current_equity = Decimal(str(bal_resp.data.equity))
     finally:
         await client.close()
 
@@ -263,9 +272,11 @@ async def _run(args: argparse.Namespace) -> int:
     starting_equity = _parse_decimal(args.starting_equity_usd, label="starting equity")
     starting_equity_source = "provided"
     if starting_equity is None:
-        if current_equity is not None:
+        if current_equity is not None and not historical_until:
             starting_equity = _infer_starting_equity(current_equity, total_pnl)
             starting_equity_source = "inferred(current_equity - total_pnl)"
+        elif historical_until:
+            starting_equity_source = "unavailable(historical --until window)"
         else:
             starting_equity_source = "unavailable"
 
@@ -286,7 +297,10 @@ async def _run(args: argparse.Namespace) -> int:
     print("PnL summary across all markets")
     print(f"Environment: {settings.environment.value}")
     print(f"Since: {_fmt_ts(since_ms)} ({since_ms})")
-    print(f"Now:   {_fmt_ts(now_ms)} ({now_ms})")
+    if args.until:
+        print(f"Until: {_fmt_ts(until_ms)} ({until_ms})")
+    else:
+        print(f"Now:   {_fmt_ts(now_ms)} ({now_ms})")
     print(f"Period: {_fmt_decimal(period_days)} days")
 
     print("\nClosed positions (history):")
@@ -298,12 +312,21 @@ async def _run(args: argparse.Namespace) -> int:
     print(f"  close_fees: {_fmt_decimal(close_fees_total)} USD")
 
     print("\nOpen positions (current):")
-    print(f"  included_positions: {open_count_included}")
-    print(f"  skipped_preexisting_positions: {open_count_skipped_preexisting}")
-    print(f"  net_size: {_fmt_decimal(net_open_size_total)}")
-    print(f"  notional: {_fmt_decimal(open_notional_total)} USD")
-    print(f"  realized_component: {_fmt_decimal(open_realized_total)} USD")
-    print(f"  unrealized_component: {_fmt_decimal(open_unrealized_total)} USD")
+    if historical_until:
+        print("  unavailable for historical --until window")
+        print("  included_positions: 0")
+        print("  skipped_preexisting_positions: 0")
+        print("  net_size: 0.000000")
+        print("  notional: 0.000000 USD")
+        print("  realized_component: 0.000000 USD")
+        print("  unrealized_component: 0.000000 USD")
+    else:
+        print(f"  included_positions: {open_count_included}")
+        print(f"  skipped_preexisting_positions: {open_count_skipped_preexisting}")
+        print(f"  net_size: {_fmt_decimal(net_open_size_total)}")
+        print(f"  notional: {_fmt_decimal(open_notional_total)} USD")
+        print(f"  realized_component: {_fmt_decimal(open_realized_total)} USD")
+        print(f"  unrealized_component: {_fmt_decimal(open_unrealized_total)} USD")
 
     print("\nTotals:")
     print(
@@ -363,8 +386,8 @@ async def _run(args: argparse.Namespace) -> int:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Fetch total account PnL across all markets since a timestamp and "
-            "compute annualized APR/APY."
+            "Fetch total account PnL across all markets between --since and "
+            "optional --until, and compute annualized APR/APY."
         )
     )
     parser.add_argument(
@@ -381,6 +404,15 @@ def _parse_args() -> argparse.Namespace:
         help=(
             "Env file to load (e.g. .env.amzn or amzn). "
             "Overrides process env with values from that file."
+        ),
+    )
+    parser.add_argument(
+        "--until",
+        default=None,
+        help=(
+            "Optional end timestamp (inclusive). Accepts epoch seconds, epoch "
+            "milliseconds, or ISO-8601 (e.g. 2026-02-01T12:00:00Z). "
+            "Defaults to current time."
         ),
     )
     parser.add_argument(

@@ -31,7 +31,7 @@ from x10.perpetual.trading_client import PerpetualTradingClient
 
 from .account_stream import AccountStreamManager, FillEvent
 from .config import ENV_FILE, MarketMakerSettings
-from .decision_models import TrendState
+from .decision_models import RegimeState, RepriceMarketContext, TrendState
 from .drawdown_stop import DrawdownStop
 from .guard_policy import GuardPolicy
 from .metrics import MetricsCollector
@@ -104,36 +104,7 @@ class MarketMakerStrategy:
         # Cancel reason tracking for journaling once cancellation is confirmed
         self._pending_cancel_reasons: Dict[str, str] = {}
 
-        self._pricing = PricingEngine(
-            settings=self._settings,
-            orderbook_mgr=self._ob,
-            risk_mgr=self._risk,
-            tick_size=self._tick_size,
-            base_order_size=self._base_order_size,
-            min_order_size_step=self._min_order_size_step,
-        )
-        self._post_only = PostOnlySafety(
-            settings=self._settings,
-            tick_size=self._tick_size,
-            round_to_tick=self._pricing.round_to_tick,
-        )
-        self._volatility = VolatilityRegime(self._settings, self._ob)
-        self._trend_signal = TrendSignal(self._settings, self._ob)
-        self._guards = GuardPolicy(self._settings)
-        self._reprice = RepricePipeline(self._settings, self._tick_size, self._pricing)
-        self._drawdown_stop = DrawdownStop(
-            enabled=self._settings.drawdown_stop_enabled,
-            max_position_notional_usd=self._settings.max_position_notional_usd,
-            drawdown_pct_of_max_notional=self._settings.drawdown_stop_pct_of_max_notional,
-            use_high_watermark=self._settings.drawdown_use_high_watermark,
-        )
-
-        # Keep legacy attribute names as aliases for one release cycle.
-        self._level_pof_until = self._post_only.pof_until
-        self._level_pof_streak = self._post_only.pof_streak
-        self._level_pof_last_ts = self._post_only.pof_last_ts
-        self._level_dynamic_safety_ticks = self._post_only.dynamic_safety_ticks
-        self._level_imbalance_pause_until = self._guards._level_imbalance_pause_until
+        self._rebuild_components()
 
         self._funding_rate = Decimal("0")
         self._shutdown_reason = "shutdown"
@@ -164,34 +135,7 @@ class MarketMakerStrategy:
         try:
             new_settings = MarketMakerSettings()
             self._settings = new_settings
-            self._pricing = PricingEngine(
-                settings=self._settings,
-                orderbook_mgr=self._ob,
-                risk_mgr=self._risk,
-                tick_size=self._tick_size,
-                base_order_size=self._base_order_size,
-                min_order_size_step=self._min_order_size_step,
-            )
-            self._post_only = PostOnlySafety(
-                settings=self._settings,
-                tick_size=self._tick_size,
-                round_to_tick=self._pricing.round_to_tick,
-            )
-            self._volatility = VolatilityRegime(self._settings, self._ob)
-            self._trend_signal = TrendSignal(self._settings, self._ob)
-            self._guards = GuardPolicy(self._settings)
-            self._reprice = RepricePipeline(self._settings, self._tick_size, self._pricing)
-            self._drawdown_stop = DrawdownStop(
-                enabled=self._settings.drawdown_stop_enabled,
-                max_position_notional_usd=self._settings.max_position_notional_usd,
-                drawdown_pct_of_max_notional=self._settings.drawdown_stop_pct_of_max_notional,
-                use_high_watermark=self._settings.drawdown_use_high_watermark,
-            )
-            self._level_pof_until = self._post_only.pof_until
-            self._level_pof_streak = self._post_only.pof_streak
-            self._level_pof_last_ts = self._post_only.pof_last_ts
-            self._level_dynamic_safety_ticks = self._post_only.dynamic_safety_ticks
-            self._level_imbalance_pause_until = self._guards._level_imbalance_pause_until
+            self._rebuild_components()
             logger.info(
                 "Config reloaded: offset_mode=%s skew=%.2f spread_min=%s levels=%d max_age=%ss",
                 new_settings.offset_mode.value,
@@ -323,7 +267,25 @@ class MarketMakerStrategy:
     # ------------------------------------------------------------------
 
     async def _maybe_reprice(self, side: OrderSide, level: int) -> None:
-        await self._reprice.evaluate(self, side, level)
+        market_ctx = self._build_reprice_market_context()
+        await self._reprice.evaluate(self, side, level, market_ctx=market_ctx)
+
+    def _build_reprice_market_context(self) -> RepriceMarketContext:
+        if self._settings.market_profile == "crypto":
+            regime = self._volatility.evaluate()
+            trend = self._trend_signal.evaluate()
+        else:
+            regime = RegimeState(regime="NORMAL")
+            trend = TrendState()
+        min_interval, max_order_age_s = self._volatility.cadence(regime)
+        return RepriceMarketContext(
+            regime=regime,
+            trend=trend,
+            min_reprice_interval_s=min_interval,
+            max_order_age_s=max_order_age_s,
+            funding_bias_bps=self._funding_bias_bps(),
+            inventory_band=self._pricing.inventory_band(),
+        )
 
     def _clear_level_slot(self, key: tuple[str, int]) -> None:
         """Clear tracking for one (side, level) slot."""
@@ -374,13 +336,28 @@ class MarketMakerStrategy:
         side: OrderSide,
         level: int,
         reason: str,
-    ) -> None:
-        """Request cancel for a level order and store a structured reason."""
+    ) -> bool:
+        """Request cancel for a level order and store a structured reason.
+
+        Returns True when the level slot can be safely freed:
+        - cancel request accepted, or
+        - order already reached a terminal state.
+        """
+        _ = (side, level)
         self._pending_cancel_reasons[external_id] = reason
         ok = await self._orders.cancel_order(external_id)
-        if not ok:
-            self._pending_cancel_reasons.pop(external_id, None)
-        self._clear_level_slot(key)
+        if ok:
+            self._clear_level_slot(key)
+            return True
+
+        # If the order is no longer active, treat it as terminal and free the slot.
+        if self._orders.find_order_by_external_id(external_id) is not None:
+            if self._orders.get_active_order(external_id) is None:
+                self._clear_level_slot(key)
+                return True
+
+        self._pending_cancel_reasons.pop(external_id, None)
+        return False
 
     def _quantize_size(self, size: Decimal) -> Decimal:
         """Quantize order size to market step size."""
@@ -527,6 +504,38 @@ class MarketMakerStrategy:
             return
         self._shutdown_reason = reason
         self._shutdown_event.set()
+
+    def _rebuild_components(self) -> None:
+        self._pricing = PricingEngine(
+            settings=self._settings,
+            orderbook_mgr=self._ob,
+            risk_mgr=self._risk,
+            tick_size=self._tick_size,
+            base_order_size=self._base_order_size,
+            min_order_size_step=self._min_order_size_step,
+        )
+        self._post_only = PostOnlySafety(
+            settings=self._settings,
+            tick_size=self._tick_size,
+            round_to_tick=self._pricing.round_to_tick,
+        )
+        self._volatility = VolatilityRegime(self._settings, self._ob)
+        self._trend_signal = TrendSignal(self._settings, self._ob)
+        self._guards = GuardPolicy(self._settings)
+        self._reprice = RepricePipeline(self._settings, self._tick_size, self._pricing)
+        self._drawdown_stop = DrawdownStop(
+            enabled=self._settings.drawdown_stop_enabled,
+            max_position_notional_usd=self._settings.max_position_notional_usd,
+            drawdown_pct_of_max_notional=self._settings.drawdown_stop_pct_of_max_notional,
+            use_high_watermark=self._settings.drawdown_use_high_watermark,
+        )
+
+        # Keep legacy attribute names as aliases for one release cycle.
+        self._level_pof_until = self._post_only.pof_until
+        self._level_pof_streak = self._post_only.pof_streak
+        self._level_pof_last_ts = self._post_only.pof_last_ts
+        self._level_dynamic_safety_ticks = self._post_only.dynamic_safety_ticks
+        self._level_imbalance_pause_until = self._guards._level_imbalance_pause_until
 
     def _evaluate_drawdown_stop(self) -> bool:
         state = self._drawdown_stop.evaluate(self._risk.get_position_total_pnl())

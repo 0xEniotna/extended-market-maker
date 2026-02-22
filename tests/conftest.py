@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import sys
 
+import pytest
+
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC_PATH = os.path.join(PROJECT_ROOT, "src")
 
@@ -14,3 +16,14 @@ os.environ["ENV"] = "env.test"
 for key in list(os.environ.keys()):
     if key.startswith("MM_"):
         os.environ.pop(key, None)
+
+
+@pytest.fixture(autouse=True)
+def _restore_environment() -> None:
+    """Prevent environment mutations from leaking across tests."""
+    snapshot = os.environ.copy()
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(snapshot)

@@ -429,6 +429,38 @@ class OrderManager:
     def get_active_orders(self) -> Dict[str, OrderInfo]:
         return dict(self._active_orders)
 
+    def get_active_order(self, external_id: Optional[str]) -> Optional[OrderInfo]:
+        """Return one active order by external id without copying the order map."""
+        if external_id is None:
+            return None
+        return self._active_orders.get(external_id)
+
+    def active_order_count(self) -> int:
+        """Return active order count without allocating a copied dict."""
+        return len(self._active_orders)
+
+    def reserved_exposure(
+        self,
+        *,
+        side: OrderSide,
+        exclude_external_id: Optional[str] = None,
+    ) -> tuple[Decimal, Decimal]:
+        """Return (reserved_same_side_qty, reserved_open_notional_usd).
+
+        The exclusion id lets callers ignore the currently tracked level order
+        while sizing a replacement order.
+        """
+        side_name = str(side)
+        same_side_qty = Decimal("0")
+        open_notional = Decimal("0")
+        for ext_id, info in self._active_orders.items():
+            if exclude_external_id is not None and ext_id == exclude_external_id:
+                continue
+            open_notional += info.size * info.price
+            if str(info.side) == side_name:
+                same_side_qty += info.size
+        return same_side_qty, open_notional
+
     def find_order_by_exchange_id(self, exchange_order_id: str) -> Optional[OrderInfo]:
         """Return tracked metadata for an exchange order id, if known."""
         return self._orders_by_exchange_id.get(exchange_order_id)

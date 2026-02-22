@@ -71,6 +71,7 @@ PYTHONPATH=src python scripts/run_market_maker.py
 - `scripts/tools/fetch_market_info.py`: inspect trading config and stats for one market.
 - `scripts/tools/fetch_pnl.py`: account-level market PnL summary.
 - `scripts/tools/fetch_total_pnl.py`: total account PnL across all markets since a timestamp, with APR/APY.
+- `scripts/tools/close_mm_position.py`: flatten one market position (reduce-only `MARKET+IOC`) for ops/agent workflows.
 - `scripts/tools/analyze_mm_logs.py`: parse text logs for lifecycle and latency diagnostics.
 - `scripts/tools/market_scout_pipeline.py`: deterministic market scouting and action-pack generation.
 - `scripts/tools/auditor_apply_scout.py`: auditor decisioning (`APPROVE`/`HOLD`/`REJECT`) over scout actions.

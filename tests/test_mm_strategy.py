@@ -200,6 +200,16 @@ def _make_strategy(
     risk = FakeRisk(position)
     orders = MagicMock()
     orders.get_active_orders.return_value = {}
+    orders.get_active_order.side_effect = (
+        lambda ext_id: orders.get_active_orders.return_value.get(ext_id)
+        if ext_id is not None
+        else None
+    )
+    orders.find_order_by_external_id.side_effect = (
+        lambda ext_id: orders.get_active_orders.return_value.get(ext_id)
+    )
+    orders.reserved_exposure.return_value = (Decimal("0"), Decimal("0"))
+    orders.active_order_count.return_value = 0
     orders.consecutive_failures = 0
 
     strategy = MarketMakerStrategy(
@@ -467,6 +477,31 @@ class TestStaleCancel:
 
         await s._maybe_reprice(OrderSide.BUY, 0)
         s._orders.cancel_order.assert_awaited_once_with("ext-1")
+
+
+class TestCancelSafety:
+    @pytest.mark.asyncio
+    async def test_cancel_failure_does_not_replace_or_clear_slot(self):
+        s = _make_strategy()
+        key = (str(OrderSide.BUY), 0)
+        s._level_ext_ids[key] = "ext-1"
+        s._level_order_created_at[key] = time.monotonic()
+        s._orders.cancel_order = AsyncMock(return_value=False)
+        s._orders.place_order = AsyncMock(return_value="ext-2")
+        s._orders.get_active_orders.return_value = {
+            "ext-1": SimpleNamespace(
+                side=OrderSide.BUY,
+                price=Decimal("1.5000"),
+                size=Decimal("10"),
+                level=0,
+            ),
+        }
+
+        await s._maybe_reprice(OrderSide.BUY, 0)
+
+        s._orders.cancel_order.assert_awaited_once_with("ext-1")
+        s._orders.place_order.assert_not_awaited()
+        assert s._level_ext_ids[key] == "ext-1"
 
 
 # ---------------------------------------------------------------------------

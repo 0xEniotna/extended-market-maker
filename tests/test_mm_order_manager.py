@@ -217,3 +217,50 @@ def test_failure_window_stats_and_reset():
     assert stats_after["attempts"] == 0.0
     assert stats_after["failures"] == 0.0
     assert stats_after["failure_rate"] == 0.0
+
+
+def test_active_order_count_and_get_active_order():
+    manager = OrderManager(MagicMock(), "TEST-USD")
+    manager._active_orders["ext-1"] = OrderInfo(
+        external_id="ext-1",
+        side=OrderSide.BUY,
+        price=Decimal("10"),
+        size=Decimal("1"),
+        level=0,
+    )
+    assert manager.active_order_count() == 1
+    assert manager.get_active_order("ext-1") is not None
+    assert manager.get_active_order("missing") is None
+
+
+def test_reserved_exposure_excludes_target_order():
+    manager = OrderManager(MagicMock(), "TEST-USD")
+    manager._active_orders["buy-1"] = OrderInfo(
+        external_id="buy-1",
+        side=OrderSide.BUY,
+        price=Decimal("10"),
+        size=Decimal("2"),
+        level=0,
+    )
+    manager._active_orders["buy-2"] = OrderInfo(
+        external_id="buy-2",
+        side=OrderSide.BUY,
+        price=Decimal("11"),
+        size=Decimal("3"),
+        level=1,
+    )
+    manager._active_orders["sell-1"] = OrderInfo(
+        external_id="sell-1",
+        side=OrderSide.SELL,
+        price=Decimal("12"),
+        size=Decimal("4"),
+        level=0,
+    )
+
+    same_side_qty, open_notional = manager.reserved_exposure(
+        side=OrderSide.BUY,
+        exclude_external_id="buy-1",
+    )
+    assert same_side_qty == Decimal("3")
+    # (3*11) + (4*12) = 81
+    assert open_notional == Decimal("81")

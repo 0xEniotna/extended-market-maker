@@ -26,8 +26,6 @@ if str(SRC_PATH) not in sys.path:
 
 from dotenv import load_dotenv  # noqa: E402
 
-load_dotenv()
-
 from market_maker.public_markets import PublicMarketsClient  # noqa: E402
 
 
@@ -273,6 +271,7 @@ def _build_json_payload(markets: list[dict], args, rounds: int, elapsed_s: float
 
 
 def main() -> None:
+    load_dotenv()
     parser = argparse.ArgumentParser(
         description="Screen MM markets using rolling spread sampling.",
     )

@@ -18,6 +18,8 @@ If one instance degrades, stop only that instance, ensure its open position is f
 - Status: `cd <repo-root> && scripts/mm_openclaw_fleet.sh status .env.amzn .env.mon .env.pump`
 - Logs: `cd <repo-root> && scripts/mm_openclaw_fleet.sh logs .env.amzn .env.mon .env.pump`
 
+Shorthand is accepted by fleet script: `amzn`, `AMZN-USD` -> `.env.amzn`.
+
 ## Analysis command
 Use:
 `PYTHONPATH=src python scripts/analyse_mm_journal.py data/mm_journal/mm_<MARKET>_<TS>.jsonl --assumed-fee-bps 0`
@@ -104,3 +106,14 @@ Breaker sensitivity:
 - When an instance is stopped, require position flatten for that market (cancel orders + close open position).
 - Explain each change in 1-2 lines with the metric trigger.
 - Never print or transmit secrets.
+
+## Output Hygiene (strict)
+- Never post raw tool failures in chat (no `Exec: ... failed` lines).
+- If a command fails, retry once with a safer equivalent.
+- Use shell patterns that do not fail on empty results:
+  - `grep ... || true`
+  - `ls ... 2>/dev/null || true`
+  - `tail ... 2>/dev/null || true`
+- If data is unavailable after retry, report concise status only:
+  - `metric=unavailable reason=<short reason>`
+- Final message must be concise and human-readable: table + 1-line action.

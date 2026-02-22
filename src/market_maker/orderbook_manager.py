@@ -17,7 +17,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 from x10.perpetual.configuration import EndpointConfig
 from x10.perpetual.orderbook import OrderBook
@@ -83,9 +83,9 @@ class OrderbookManager:
         self._spread_ema_alpha: Decimal = Decimal("0.15")  # ~7-sample half-life
 
         # Mid-price history for short-horizon toxicity metrics.
-        self._mid_history = deque()
+        self._mid_history: Deque[tuple[float, Decimal]] = deque()
         self._mid_history_max_age_s = _MID_HISTORY_MAX_AGE_S
-        self._imbalance_history = deque()
+        self._imbalance_history: Deque[tuple[float, Decimal]] = deque()
         self._imbalance_history_max_age_s = _MID_HISTORY_MAX_AGE_S
 
         # Staleness warning throttling.
@@ -204,24 +204,20 @@ class OrderbookManager:
 
     def micro_volatility_bps(self, window_s: float) -> Optional[Decimal]:
         """Return high-low range in bps over *window_s* seconds."""
-        samples = self._mid_window(window_s)
-        if len(samples) < 2:
+        stats = self._mid_window_stats(window_s)
+        if stats is None:
             return None
-        mids = [mid for _, mid in samples]
-        latest_mid = mids[-1]
+        _, latest_mid, high_mid, low_mid = stats
         if latest_mid <= 0:
             return None
-        high = max(mids)
-        low = min(mids)
-        return (high - low) / latest_mid * Decimal("10000")
+        return (high_mid - low_mid) / latest_mid * Decimal("10000")
 
     def micro_drift_bps(self, window_s: float) -> Optional[Decimal]:
         """Return signed drift in bps over *window_s* seconds."""
-        samples = self._mid_window(window_s)
-        if len(samples) < 2:
+        stats = self._mid_window_stats(window_s)
+        if stats is None:
             return None
-        first_mid = samples[0][1]
-        last_mid = samples[-1][1]
+        first_mid, last_mid, _, _ = stats
         if first_mid <= 0:
             return None
         return (last_mid - first_mid) / first_mid * Decimal("10000")
@@ -236,11 +232,7 @@ class OrderbookManager:
         imbalance = (bid_size - ask_size) / (bid_size + ask_size)
         in [-1, +1]. Positive means bid-dominant.
         """
-        samples = self._imbalance_window(window_s)
-        if not samples:
-            return None
-        values = [imb for _, imb in samples]
-        return sum(values) / Decimal(len(values))
+        return self._imbalance_window_mean(window_s)
 
     def market_snapshot(
         self,
@@ -438,13 +430,49 @@ class OrderbookManager:
         while self._mid_history and self._mid_history[0][0] < cutoff:
             self._mid_history.popleft()
 
-    def _mid_window(self, window_s: float):
+    def _mid_window(self, window_s: float) -> list[tuple[float, Decimal]]:
         if window_s <= 0:
             return []
         now = time.monotonic()
         self._prune_mid_history(now)
         cutoff = now - float(window_s)
         return [(ts, mid) for ts, mid in self._mid_history if ts >= cutoff]
+
+    def _mid_window_stats(
+        self,
+        window_s: float,
+    ) -> Optional[tuple[Decimal, Decimal, Decimal, Decimal]]:
+        if window_s <= 0:
+            return None
+
+        now = time.monotonic()
+        self._prune_mid_history(now)
+        cutoff = now - float(window_s)
+
+        first_mid: Optional[Decimal] = None
+        last_mid: Optional[Decimal] = None
+        high_mid: Optional[Decimal] = None
+        low_mid: Optional[Decimal] = None
+        count = 0
+        for ts, mid in self._mid_history:
+            if ts < cutoff:
+                continue
+            count += 1
+            if first_mid is None:
+                first_mid = mid
+            last_mid = mid
+            high_mid = mid if high_mid is None else max(high_mid, mid)
+            low_mid = mid if low_mid is None else min(low_mid, mid)
+
+        if (
+            count < 2
+            or first_mid is None
+            or last_mid is None
+            or high_mid is None
+            or low_mid is None
+        ):
+            return None
+        return first_mid, last_mid, high_mid, low_mid
 
     def _record_imbalance(self) -> None:
         """Append current top-of-book imbalance and prune old points."""
@@ -466,13 +494,30 @@ class OrderbookManager:
         while self._imbalance_history and self._imbalance_history[0][0] < cutoff:
             self._imbalance_history.popleft()
 
-    def _imbalance_window(self, window_s: float):
+    def _imbalance_window(self, window_s: float) -> list[tuple[float, Decimal]]:
         if window_s <= 0:
             return []
         now = time.monotonic()
         self._prune_imbalance_history(now)
         cutoff = now - float(window_s)
         return [(ts, imb) for ts, imb in self._imbalance_history if ts >= cutoff]
+
+    def _imbalance_window_mean(self, window_s: float) -> Optional[Decimal]:
+        if window_s <= 0:
+            return None
+        now = time.monotonic()
+        self._prune_imbalance_history(now)
+        cutoff = now - float(window_s)
+        total = Decimal("0")
+        count = 0
+        for ts, imbalance in self._imbalance_history:
+            if ts < cutoff:
+                continue
+            total += imbalance
+            count += 1
+        if count == 0:
+            return None
+        return total / Decimal(count)
 
     def _book_levels(self, side: str, depth: int) -> List[Dict[str, Decimal]]:
         """Return top *depth* levels from the in-memory orderbook cache."""

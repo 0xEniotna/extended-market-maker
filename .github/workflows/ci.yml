@@ -32,5 +32,8 @@ jobs:
       - name: Lint
         run: ruff check src scripts tests
 
+      - name: Type check
+        run: PYTHONPATH=src mypy src/market_maker
+
       - name: Test
         run: PYTHONPATH=src pytest tests/ -q
