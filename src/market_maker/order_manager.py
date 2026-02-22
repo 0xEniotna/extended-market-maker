@@ -408,6 +408,7 @@ class OrderManager:
         slippage_bps: Decimal,
         risk_mgr=None,
         wait_for_fill_s: float = 0,
+        last_known_mid: Optional[Decimal] = None,
     ) -> FlattenResult:
         """Submit a reduce-only MARKET+IOC order to flatten a signed position.
 
@@ -415,6 +416,13 @@ class OrderManager:
         manager's cached position after submission to verify the fill actually
         reduced the position.  ``remaining_position`` in the result reflects
         the position observed after the wait.
+
+        One-sided book handling:
+        - If the natural BBO side is missing, use the available side with extra
+          slippage (``slippage_bps`` is applied to whichever price is used).
+        - If both sides are missing, fall back to ``last_known_mid`` with 50 bps
+          slippage.
+        - Only give up if no price reference exists at all.
         """
         if signed_position == 0:
             return FlattenResult(
@@ -442,26 +450,50 @@ class OrderManager:
                 size=close_size,
             )
 
+        # --- Price resolution with one-sided book fallback ---
         ref_price = best_bid if side == OrderSide.SELL else best_ask
+        effective_slippage = slippage_bps
         if ref_price is None or ref_price <= 0:
-            # Fallback to opposite side if one side is temporarily missing.
+            # Fallback to opposite side with extra slippage.
             ref_price = best_ask if side == OrderSide.SELL else best_bid
+            if ref_price is not None and ref_price > 0:
+                logger.warning(
+                    "Flatten using opposite-side BBO for market=%s: "
+                    "natural side missing, using ref_price=%s with slippage=%sbps",
+                    self._market_name,
+                    ref_price,
+                    effective_slippage,
+                )
         if ref_price is None or ref_price <= 0:
-            logger.error(
-                "Cannot flatten position for market=%s: missing usable orderbook price (bid=%s ask=%s)",
-                self._market_name,
-                best_bid,
-                best_ask,
-            )
-            return FlattenResult(
-                attempted=False,
-                success=False,
-                reason="missing_orderbook_price",
-                side=side,
-                size=close_size,
-            )
+            # Both sides missing: fall back to last known mid with 50bps slippage.
+            if last_known_mid is not None and last_known_mid > 0:
+                ref_price = last_known_mid
+                effective_slippage = max(slippage_bps, Decimal("50"))
+                logger.warning(
+                    "Flatten using last known mid for market=%s: "
+                    "both BBO sides missing, ref_price=%s slippage=%sbps",
+                    self._market_name,
+                    ref_price,
+                    effective_slippage,
+                )
+            else:
+                logger.error(
+                    "Cannot flatten position for market=%s: "
+                    "no price reference at all (bid=%s ask=%s last_mid=%s)",
+                    self._market_name,
+                    best_bid,
+                    best_ask,
+                    last_known_mid,
+                )
+                return FlattenResult(
+                    attempted=False,
+                    success=False,
+                    reason="missing_orderbook_price",
+                    side=side,
+                    size=close_size,
+                )
 
-        bps = max(Decimal("0"), slippage_bps) / Decimal("10000")
+        bps = max(Decimal("0"), effective_slippage) / Decimal("10000")
         if side == OrderSide.SELL:
             target_price = ref_price * (Decimal("1") - bps)
         else:

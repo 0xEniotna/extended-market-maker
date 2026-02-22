@@ -659,8 +659,25 @@ class MarketMakerSettings(BaseSettings):
         default=Decimal("20"),
         ge=0,
         description=(
-            "Price aggressiveness (bps) used for shutdown flatten orders. "
+            "Initial price aggressiveness (bps) used for shutdown flatten orders. "
             "Higher values increase fill probability."
+        ),
+    )
+    shutdown_flatten_slippage_step_bps: Decimal = Field(
+        default=Decimal("10"),
+        ge=0,
+        description=(
+            "Additional slippage added per flatten retry (progressive slippage). "
+            "Attempt 1 uses shutdown_flatten_slippage_bps, "
+            "attempt 2 uses +step, etc."
+        ),
+    )
+    shutdown_flatten_max_slippage_bps: Decimal = Field(
+        default=Decimal("100"),
+        ge=0,
+        description=(
+            "Maximum slippage (bps) for shutdown flatten orders, "
+            "capping the progressive slippage escalation."
         ),
     )
     shutdown_flatten_retries: int = Field(
@@ -677,6 +694,14 @@ class MarketMakerSettings(BaseSettings):
         le=60,
         description=(
             "Delay between shutdown flatten retries."
+        ),
+    )
+    shutdown_timeout_s: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            "Hard timeout for the entire shutdown sequence. "
+            "If exceeded, writes an emergency state file and force-exits."
         ),
     )
 
