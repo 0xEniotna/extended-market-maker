@@ -171,6 +171,22 @@ class MarketMakerSettings(BaseSettings):
         gt=0,
         description="Maximum absolute position size (in contracts)",
     )
+    max_long_position_size: Decimal = Field(
+        default=Decimal("0"),
+        ge=0,
+        description=(
+            "Maximum long position size (contracts). "
+            "0 falls back to the symmetric max_position_size."
+        ),
+    )
+    max_short_position_size: Decimal = Field(
+        default=Decimal("0"),
+        ge=0,
+        description=(
+            "Maximum short position size (contracts). "
+            "0 falls back to the symmetric max_position_size."
+        ),
+    )
     max_order_notional_usd: Decimal = Field(
         default=Decimal("250"),
         ge=0,
@@ -184,6 +200,14 @@ class MarketMakerSettings(BaseSettings):
         ge=0,
         description=(
             "Maximum absolute position notional (USD). "
+            "0 disables this cap."
+        ),
+    )
+    gross_exposure_limit_usd: Decimal = Field(
+        default=Decimal("0"),
+        ge=0,
+        description=(
+            "Maximum gross exposure = abs(position * ref_price) + sum(active order notionals). "
             "0 disables this cap."
         ),
     )
@@ -215,6 +239,15 @@ class MarketMakerSettings(BaseSettings):
         ge=Decimal("0"),
         description=(
             "Absolute collateral buffer to keep untouched before sizing new orders."
+        ),
+    )
+    balance_staleness_max_s: float = Field(
+        default=30.0,
+        ge=0,
+        description=(
+            "Maximum age (seconds) of cached balance before it is treated as stale. "
+            "When stale, balance-aware sizing is skipped rather than using outdated data. "
+            "0 disables staleness checking."
         ),
     )
     reprice_tolerance_percent: Decimal = Field(

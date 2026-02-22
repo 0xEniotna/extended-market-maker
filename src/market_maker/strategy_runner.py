@@ -151,10 +151,15 @@ def _build_runtime_context(
         settings.max_position_size,
         max_order_notional_usd=settings.max_order_notional_usd,
         max_position_notional_usd=settings.max_position_notional_usd,
+        gross_exposure_limit_usd=settings.gross_exposure_limit_usd,
+        max_long_position_size=settings.max_long_position_size,
+        max_short_position_size=settings.max_short_position_size,
         balance_aware_sizing_enabled=settings.balance_aware_sizing_enabled,
         balance_usage_factor=settings.balance_usage_factor,
         balance_notional_multiplier=settings.balance_notional_multiplier,
         balance_min_available_usd=settings.balance_min_available_usd,
+        balance_staleness_max_s=settings.balance_staleness_max_s,
+        orderbook_mgr=ob_mgr,
     )
     account_stream = AccountStreamManager(
         settings.endpoint_config, settings.api_key, settings.market_name
