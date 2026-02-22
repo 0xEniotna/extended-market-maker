@@ -23,8 +23,9 @@ import logging
 import os
 import subprocess
 import time
+from collections import deque
 from decimal import ROUND_DOWN, Decimal
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
 from x10.perpetual.orders import OrderSide
 from x10.perpetual.trading_client import PerpetualTradingClient
@@ -103,6 +104,10 @@ class MarketMakerStrategy:
         self._level_stale_since: Dict[tuple[str, int], Optional[float]] = {}
         # Cancel reason tracking for journaling once cancellation is confirmed
         self._pending_cancel_reasons: Dict[str, str] = {}
+
+        # Fill deduplication: ordered deque + fast lookup set, capped at 10k entries.
+        self._seen_trade_ids: deque = deque()
+        self._seen_trade_ids_set: Set[int] = set()
 
         self._rebuild_components()
 
@@ -716,7 +721,7 @@ class MarketMakerStrategy:
     # ------------------------------------------------------------------
 
     async def _circuit_breaker_task(self) -> None:
-        """Monitor consecutive failures and pause quoting when threshold is hit."""
+        """Monitor consecutive failures, sweep pending cancels, and detect zombies."""
         max_failures = self._settings.circuit_breaker_max_failures
         cooldown = self._settings.circuit_breaker_cooldown_s
         failure_window_s = self._settings.failure_window_s
@@ -725,6 +730,26 @@ class MarketMakerStrategy:
 
         while not self._shutdown_event.is_set():
             try:
+                # --- Sweep pending-cancel orders that timed out ---
+                self._orders.sweep_pending_cancels()
+
+                # --- Zombie order detection ---
+                zombie_threshold_s = self._settings.max_order_age_s * 2
+                if zombie_threshold_s > 0:
+                    zombies = self._orders.find_zombie_orders(zombie_threshold_s)
+                    for zombie in zombies:
+                        logger.warning(
+                            "Zombie order detected (no stream update in %.0fs): "
+                            "ext_id=%s exchange_id=%s side=%s level=%d — cancelling",
+                            time.monotonic() - zombie.placed_at,
+                            zombie.external_id,
+                            zombie.exchange_order_id,
+                            zombie.side,
+                            zombie.level,
+                        )
+                        await self._orders.cancel_order(zombie.external_id)
+
+                # --- Failure rate circuit breaker ---
                 window_stats = self._orders.failure_window_stats(failure_window_s)
                 attempts = int(window_stats["attempts"])
                 failure_rate = float(window_stats["failure_rate"])

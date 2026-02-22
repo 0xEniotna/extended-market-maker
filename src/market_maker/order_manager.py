@@ -11,6 +11,7 @@ tracking dict stays accurate in real-time.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -38,6 +39,9 @@ _TERMINAL_STATUSES = frozenset({
     OrderStatus.REJECTED,
 })
 
+# Default timeout for pending-cancel orders before force-removal.
+_PENDING_CANCEL_TIMEOUT_S = 10.0
+
 
 @dataclass
 class OrderInfo:
@@ -50,6 +54,7 @@ class OrderInfo:
     level: int
     exchange_order_id: Optional[str] = None
     placed_at: float = field(default_factory=time.monotonic)
+    last_stream_update_at: Optional[float] = None
 
 
 @dataclass
@@ -62,6 +67,7 @@ class FlattenResult:
     side: Optional[OrderSide] = None
     size: Optional[Decimal] = None
     price: Optional[Decimal] = None
+    remaining_position: Optional[Decimal] = None
 
 
 # Callback invoked when an order for a specific level is removed (filled / cancelled).
@@ -84,6 +90,15 @@ class OrderManager:
         self._active_orders: Dict[str, OrderInfo] = {}
         self._recent_orders_by_external_id: Dict[str, OrderInfo] = {}
         self._orders_by_exchange_id: Dict[str, OrderInfo] = {}
+
+        # Pending placements: orders submitted to the exchange but whose
+        # place_order() call has not yet returned.  The account stream may
+        # deliver a confirmation before the HTTP response arrives.
+        self._pending_placements: Dict[str, OrderInfo] = {}
+
+        # Orders marked as pending-cancel by cancel_all_orders().
+        # Value is the monotonic time at which the cancel was issued.
+        self._pending_cancel: Dict[str, float] = {}
 
         # Callbacks fired when a level's order is removed by the stream
         self._level_freed_callbacks: List[LevelFreedCallback] = []
@@ -109,21 +124,40 @@ class OrderManager:
         """Called by AccountStreamManager on every order status change.
 
         Removes terminal orders from tracking so the dict stays accurate.
+        Also checks ``_pending_placements`` for orders whose stream
+        confirmation arrived before ``place_order()`` returned.
         """
-        tracked = self._active_orders.get(order.external_id)
-        if tracked is not None and tracked.exchange_order_id is None:
-            exchange_id = getattr(order, "id", None)
-            if exchange_id is None:
-                exchange_id = getattr(order, "order_id", None)
-            if exchange_id is not None:
-                tracked.exchange_order_id = str(exchange_id)
-                self._orders_by_exchange_id[str(exchange_id)] = tracked
+        ext_id = order.external_id
+
+        # --- Promote from pending_placements if not yet in active_orders ---
+        if ext_id not in self._active_orders and ext_id in self._pending_placements:
+            info = self._pending_placements.pop(ext_id)
+            self._active_orders[ext_id] = info
+            self._recent_orders_by_external_id[ext_id] = info
+            logger.info(
+                "Promoted pending placement to active: ext_id=%s",
+                ext_id,
+            )
+
+        tracked = self._active_orders.get(ext_id)
+        if tracked is not None:
+            # Record stream activity timestamp for zombie detection.
+            tracked.last_stream_update_at = time.monotonic()
+            if tracked.exchange_order_id is None:
+                exchange_id = getattr(order, "id", None)
+                if exchange_id is None:
+                    exchange_id = getattr(order, "order_id", None)
+                if exchange_id is not None:
+                    tracked.exchange_order_id = str(exchange_id)
+                    self._orders_by_exchange_id[str(exchange_id)] = tracked
 
         if order.status not in _TERMINAL_STATUSES:
             return
 
         # Find by external_id
-        info = self._active_orders.pop(order.external_id, None)
+        info = self._active_orders.pop(ext_id, None)
+        # Also clear from pending_cancel if present.
+        self._pending_cancel.pop(ext_id, None)
         if info is None:
             return
         self._recent_orders_by_external_id[info.external_id] = info
@@ -176,6 +210,19 @@ class OrderManager:
         Returns the external_id on success, None on failure.
         """
         external_id = self._generate_external_id()
+
+        # Register in pending_placements *before* the await so that
+        # handle_order_update can find the order if the stream delivers
+        # the confirmation before the HTTP response.
+        pending_info = OrderInfo(
+            external_id=external_id,
+            side=side,
+            price=price,
+            size=size,
+            level=level,
+        )
+        self._pending_placements[external_id] = pending_info
+
         self._record_attempt()
         try:
             resp = await self._client.place_order(
@@ -194,6 +241,8 @@ class OrderManager:
                 if resp.status != "OK" or resp.error is not None:
                     self.consecutive_failures += 1
                     self._record_failure()
+                    # Clean up pending placement on rejection
+                    self._pending_placements.pop(external_id, None)
                     side_name = getattr(side, "value", str(side))
                     logger.warning(
                         "Order rejected: side=%s price=%s error=%s failures=%d",
@@ -207,18 +256,24 @@ class OrderManager:
             # Extract exchange order id
             exchange_id = self._extract_exchange_id(resp)
 
-            info = OrderInfo(
-                external_id=external_id,
-                side=side,
-                price=price,
-                size=size,
-                level=level,
-                exchange_order_id=exchange_id,
-            )
-            self._active_orders[external_id] = info
+            # The order may have already been promoted from
+            # _pending_placements by handle_order_update.
+            if external_id in self._active_orders:
+                info = self._active_orders[external_id]
+                if exchange_id is not None and info.exchange_order_id is None:
+                    info.exchange_order_id = exchange_id
+                    self._orders_by_exchange_id[exchange_id] = info
+            else:
+                info = self._pending_placements.pop(external_id, None) or pending_info
+                if exchange_id is not None:
+                    info.exchange_order_id = exchange_id
+                self._active_orders[external_id] = info
+                if exchange_id is not None:
+                    self._orders_by_exchange_id[exchange_id] = info
+
             self._recent_orders_by_external_id[external_id] = info
-            if exchange_id is not None:
-                self._orders_by_exchange_id[exchange_id] = info
+            # Always clear from pending now that it's in active
+            self._pending_placements.pop(external_id, None)
             self.consecutive_failures = 0
 
             logger.info(
@@ -235,6 +290,7 @@ class OrderManager:
         except Exception as exc:
             self.consecutive_failures += 1
             self._record_failure()
+            self._pending_placements.pop(external_id, None)
             logger.error(
                 "Failed to place order: side=%s price=%s size=%s level=%d error=%s",
                 side,
@@ -274,28 +330,71 @@ class OrderManager:
             return False
 
     async def cancel_all_orders(self) -> None:
-        """Cancel every order for this market using mass-cancel (single API call)."""
+        """Cancel every order for this market using mass-cancel (single API call).
+
+        Instead of clearing ``_active_orders`` immediately, marks every order
+        as *pending_cancel* and lets the account stream confirm each
+        cancellation.  A timeout sweeper (``sweep_pending_cancels``) handles
+        stragglers that never receive a stream confirmation.
+        """
         try:
+            now = time.monotonic()
+            for ext_id in list(self._active_orders):
+                self._pending_cancel[ext_id] = now
+
             await self._client.orders.mass_cancel(
                 markets=[self._market_name],
             )
             logger.info(
-                "Mass cancel issued for market=%s (%d tracked orders)",
+                "Mass cancel issued for market=%s (%d orders marked pending_cancel)",
                 self._market_name,
-                len(self._active_orders),
+                len(self._pending_cancel),
             )
-            # The stream will confirm each cancellation; clear tracking optimistically
-            self._active_orders.clear()
         except Exception as exc:
             logger.error(
                 "Mass cancel failed for market=%s: %s — falling back to per-order cancel",
                 self._market_name,
                 exc,
             )
+            # Clear pending_cancel state since mass cancel failed
+            self._pending_cancel.clear()
             # Fallback: cancel individually
             ext_ids = list(self._active_orders.keys())
             for ext_id in ext_ids:
                 await self.cancel_order(ext_id)
+
+    def sweep_pending_cancels(
+        self,
+        timeout_s: float = _PENDING_CANCEL_TIMEOUT_S,
+    ) -> int:
+        """Force-remove orders stuck in pending_cancel beyond *timeout_s*.
+
+        Returns the number of orders force-removed.
+        """
+        now = time.monotonic()
+        removed = 0
+        for ext_id in list(self._pending_cancel):
+            cancel_ts = self._pending_cancel[ext_id]
+            if (now - cancel_ts) < timeout_s:
+                continue
+            info = self._active_orders.pop(ext_id, None)
+            self._pending_cancel.pop(ext_id, None)
+            if info is not None:
+                self._recent_orders_by_external_id[ext_id] = info
+                logger.warning(
+                    "Force-removed pending_cancel order after %.1fs: "
+                    "ext_id=%s exchange_id=%s level=%d",
+                    now - cancel_ts,
+                    ext_id,
+                    info.exchange_order_id,
+                    info.level,
+                )
+                removed += 1
+        return removed
+
+    def is_pending_cancel(self, external_id: str) -> bool:
+        """Return True if the order is awaiting cancel confirmation."""
+        return external_id in self._pending_cancel
 
     async def flatten_position(
         self,
@@ -307,13 +406,22 @@ class OrderManager:
         min_order_size: Decimal,
         size_step: Decimal,
         slippage_bps: Decimal,
+        risk_mgr=None,
+        wait_for_fill_s: float = 0,
     ) -> FlattenResult:
-        """Submit a reduce-only MARKET+IOC order to flatten a signed position."""
+        """Submit a reduce-only MARKET+IOC order to flatten a signed position.
+
+        When *risk_mgr* and *wait_for_fill_s* > 0 are given, poll the risk
+        manager's cached position after submission to verify the fill actually
+        reduced the position.  ``remaining_position`` in the result reflects
+        the position observed after the wait.
+        """
         if signed_position == 0:
             return FlattenResult(
                 attempted=False,
                 success=True,
                 reason="already_flat",
+                remaining_position=Decimal("0"),
             )
 
         side = OrderSide.SELL if signed_position > 0 else OrderSide.BUY
@@ -401,6 +509,16 @@ class OrderManager:
                 price,
                 external_id,
             )
+
+            # --- Wait-for-fill verification ---
+            remaining_position: Optional[Decimal] = None
+            if risk_mgr is not None and wait_for_fill_s > 0:
+                remaining_position = await self._wait_for_position_change(
+                    risk_mgr=risk_mgr,
+                    initial_position=signed_position,
+                    timeout_s=wait_for_fill_s,
+                )
+
             return FlattenResult(
                 attempted=True,
                 success=True,
@@ -408,6 +526,7 @@ class OrderManager:
                 side=side,
                 size=close_size,
                 price=price,
+                remaining_position=remaining_position,
             )
         except Exception as exc:
             logger.exception(
@@ -448,13 +567,17 @@ class OrderManager:
         """Return (reserved_same_side_qty, reserved_open_notional_usd).
 
         The exclusion id lets callers ignore the currently tracked level order
-        while sizing a replacement order.
+        while sizing a replacement order.  Orders pending cancellation are
+        excluded since they will not be filled.
         """
         side_name = str(side)
         same_side_qty = Decimal("0")
         open_notional = Decimal("0")
         for ext_id, info in self._active_orders.items():
             if exclude_external_id is not None and ext_id == exclude_external_id:
+                continue
+            # Skip orders that are awaiting cancel confirmation
+            if ext_id in self._pending_cancel:
                 continue
             open_notional += info.size * info.price
             if str(info.side) == side_name:
@@ -472,6 +595,26 @@ class OrderManager:
     def remove_order(self, external_id: str) -> None:
         """Remove an order from tracking without cancelling (e.g. after fill)."""
         self._active_orders.pop(external_id, None)
+
+    def find_zombie_orders(self, max_age_s: float) -> List[OrderInfo]:
+        """Return orders older than *max_age_s* that never received a stream update.
+
+        These "zombie" orders were likely lost — the exchange may have
+        processed them but the stream confirmation never arrived.
+        """
+        now = time.monotonic()
+        zombies: List[OrderInfo] = []
+        for info in self._active_orders.values():
+            age = now - info.placed_at
+            if age < max_age_s:
+                continue
+            # Skip orders awaiting cancel
+            if info.external_id in self._pending_cancel:
+                continue
+            # A zombie is one that never received *any* stream update
+            if info.last_stream_update_at is None:
+                zombies.append(info)
+        return zombies
 
     def failure_window_stats(self, window_s: float) -> Dict[str, float]:
         """Return rolling attempt/failure stats for *window_s* seconds."""
@@ -525,6 +668,36 @@ class OrderManager:
                 if key in data and data[key] is not None:
                     return str(data[key])
         return None
+
+    @staticmethod
+    async def _wait_for_position_change(
+        *,
+        risk_mgr,
+        initial_position: Decimal,
+        timeout_s: float,
+        poll_interval_s: float = 0.25,
+    ) -> Decimal:
+        """Poll risk_mgr position until it differs from *initial_position* or timeout."""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            current = risk_mgr.get_current_position()
+            if current != initial_position:
+                logger.info(
+                    "Flatten fill confirmed: position moved %s -> %s",
+                    initial_position,
+                    current,
+                )
+                return current
+            await asyncio.sleep(poll_interval_s)
+
+        current = risk_mgr.get_current_position()
+        if current == initial_position:
+            logger.warning(
+                "Flatten wait timed out after %.1fs: position still %s",
+                timeout_s,
+                current,
+            )
+        return current
 
     def _record_attempt(self) -> None:
         self._attempt_timestamps.append(time.monotonic())
