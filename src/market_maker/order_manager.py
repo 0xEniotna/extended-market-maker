@@ -108,6 +108,11 @@ class OrderManager:
         self._attempt_timestamps: deque[float] = deque()
         self._failure_timestamps: deque[float] = deque()
 
+        # Latency tracking: rolling window of place_order round-trip times (ms).
+        self._latency_samples: deque[float] = deque(maxlen=50)
+        # Map ext_id → monotonic send time for orders awaiting first stream ack.
+        self._placement_send_ts: Dict[str, float] = {}
+
     # ------------------------------------------------------------------
     # Callback registration
     # ------------------------------------------------------------------
@@ -141,8 +146,14 @@ class OrderManager:
 
         tracked = self._active_orders.get(ext_id)
         if tracked is not None:
+            now = time.monotonic()
             # Record stream activity timestamp for zombie detection.
-            tracked.last_stream_update_at = time.monotonic()
+            tracked.last_stream_update_at = now
+            # Record latency on first stream ack for this order.
+            send_ts = self._placement_send_ts.pop(ext_id, None)
+            if send_ts is not None:
+                latency_ms = (now - send_ts) * 1000.0
+                self._latency_samples.append(latency_ms)
             if tracked.exchange_order_id is None:
                 exchange_id = getattr(order, "id", None)
                 if exchange_id is None:
@@ -222,6 +233,7 @@ class OrderManager:
             level=level,
         )
         self._pending_placements[external_id] = pending_info
+        self._placement_send_ts[external_id] = time.monotonic()
 
         self._record_attempt()
         try:
@@ -243,6 +255,7 @@ class OrderManager:
                     self._record_failure()
                     # Clean up pending placement on rejection
                     self._pending_placements.pop(external_id, None)
+                    self._placement_send_ts.pop(external_id, None)
                     side_name = getattr(side, "value", str(side))
                     logger.warning(
                         "Order rejected: side=%s price=%s error=%s failures=%d",
@@ -291,6 +304,7 @@ class OrderManager:
             self.consecutive_failures += 1
             self._record_failure()
             self._pending_placements.pop(external_id, None)
+            self._placement_send_ts.pop(external_id, None)
             logger.error(
                 "Failed to place order: side=%s price=%s size=%s level=%d error=%s",
                 side,
@@ -665,6 +679,16 @@ class OrderManager:
         self.consecutive_failures = 0
         self._attempt_timestamps.clear()
         self._failure_timestamps.clear()
+
+    def avg_placement_latency_ms(self) -> float:
+        """Return rolling average order placement latency in ms, or 0 if no samples."""
+        if not self._latency_samples:
+            return 0.0
+        return sum(self._latency_samples) / len(self._latency_samples)
+
+    def latency_sample_count(self) -> int:
+        """Return number of latency samples collected."""
+        return len(self._latency_samples)
 
     # ------------------------------------------------------------------
     # Internal helpers

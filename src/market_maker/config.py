@@ -307,6 +307,15 @@ class MarketMakerSettings(BaseSettings):
         ),
     )
 
+    min_acceptable_markout_bps: Decimal = Field(
+        default=Decimal("-2"),
+        description=(
+            "Minimum acceptable 5-second markout (bps) per level. "
+            "If a level's rolling average drops below this, its offset "
+            "is automatically widened by 1 tick."
+        ),
+    )
+
     # --- Reprice Rate Limiting ---
     min_reprice_interval_s: float = Field(
         default=0.5,

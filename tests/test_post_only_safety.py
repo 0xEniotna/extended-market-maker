@@ -50,7 +50,10 @@ def test_rejection_increases_streak_and_ticks():
 def test_success_decays_streak():
     safety = PostOnlySafety(_settings(), Decimal("0.01"), _round_to_tick)
     key = ("SELL", 1)
-    safety.on_rejection(key)
-    safety.on_rejection(key)
+    # Build streak high enough that decay doesn't reach 0 in one step
+    for _ in range(4):
+        safety.on_rejection(key)
+    assert safety.pof_streak[key] == 4
     safety.on_success(key)
-    assert safety.pof_streak[key] == 1
+    # min(4//2, 4-2) = min(2, 2) = 2
+    assert safety.pof_streak[key] == 2

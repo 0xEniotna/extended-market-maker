@@ -54,6 +54,15 @@ def on_fill(strategy, fill: FillEvent) -> None:
         key = (str(order_info.side), order_info.level)
         strategy._reset_pof_state(key)
 
+        # Record fill in fill quality tracker (markout scheduling).
+        fill_quality = getattr(strategy, "_fill_quality", None)
+        if fill_quality is not None:
+            fill_quality.record_fill(
+                key=key,
+                fill_price=fill.price,
+                side_name=str(order_info.side),
+            )
+
     strategy._journal.record_fill(
         trade_id=fill.trade_id,
         order_id=fill.order_id,

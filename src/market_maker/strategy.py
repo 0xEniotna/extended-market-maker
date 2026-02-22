@@ -34,6 +34,7 @@ from .account_stream import AccountStreamManager, FillEvent
 from .config import ENV_FILE, MarketMakerSettings
 from .decision_models import RegimeState, RepriceMarketContext, TrendState
 from .drawdown_stop import DrawdownStop
+from .fill_quality import FillQualityTracker
 from .guard_policy import GuardPolicy
 from .metrics import MetricsCollector
 from .order_manager import OrderManager
@@ -373,7 +374,54 @@ class MarketMakerStrategy:
         return size.quantize(self._min_order_size_step, rounding=ROUND_DOWN)
 
     def _effective_safety_ticks(self, key: tuple[str, int]) -> int:
-        return self._post_only.effective_ticks(key)
+        avg_latency_ms = self._orders.avg_placement_latency_ms()
+        tick_time_ms = self._estimate_tick_time_ms()
+        return self._post_only.effective_ticks(
+            key, avg_latency_ms=avg_latency_ms, tick_time_ms=tick_time_ms,
+        )
+
+    def _estimate_tick_time_ms(self) -> float:
+        """Estimate how many ms it takes for the market to move one tick.
+
+        Uses recent micro-volatility to derive price speed, then converts
+        tick_size into a time estimate.  Returns 0 if data is insufficient
+        (which disables the latency-tick buffer).
+        """
+        window_s = self._settings.micro_vol_window_s
+        if window_s <= 0:
+            return 0.0
+        vol_bps = self._ob.micro_volatility_bps(window_s)
+        if vol_bps is None or vol_bps <= 0:
+            return 0.0
+        bid = self._ob.best_bid()
+        ask = self._ob.best_ask()
+        if bid is None or ask is None:
+            return 0.0
+        bp = getattr(bid, "price", None)
+        ap = getattr(ask, "price", None)
+        if bp is None or ap is None or bp <= 0 or ap <= 0:
+            return 0.0
+        mid = (bp + ap) / 2
+        tick_bps = float(self._tick_size / mid * Decimal("10000"))
+        if tick_bps <= 0:
+            return 0.0
+        # vol_bps is measured over window_s seconds
+        vol_per_ms = float(vol_bps) / (window_s * 1000.0)
+        if vol_per_ms <= 0:
+            return 0.0
+        return tick_bps / vol_per_ms
+
+    def _on_adverse_markout_widen(self, key: tuple[str, int], reason: str) -> None:
+        """Callback from FillQualityTracker when a level has adverse markout."""
+        base_ticks = max(1, int(self._settings.post_only_safety_ticks))
+        max_ticks = max(base_ticks, int(self._settings.pof_max_safety_ticks))
+        current = self._post_only.dynamic_safety_ticks.get(key, base_ticks)
+        new_ticks = min(max_ticks, current + 1)
+        self._post_only.dynamic_safety_ticks[key] = new_ticks
+        logger.warning(
+            "Adverse markout widen for %s: safety_ticks %d -> %d (reason=%s)",
+            key, current, new_ticks, reason,
+        )
 
     def _apply_adaptive_pof_reject(self, key: tuple[str, int]) -> None:
         self._post_only.on_rejection(key)
@@ -534,6 +582,17 @@ class MarketMakerStrategy:
             drawdown_pct_of_max_notional=self._settings.drawdown_stop_pct_of_max_notional,
             use_high_watermark=self._settings.drawdown_use_high_watermark,
         )
+
+        # Fill quality tracker for markout analysis and auto-widening.
+        self._fill_quality = FillQualityTracker(self._ob)
+        self._fill_quality.set_min_acceptable_markout_bps(
+            self._settings.min_acceptable_markout_bps,
+        )
+        self._fill_quality.set_offset_widen_callback(self._on_adverse_markout_widen)
+
+        # Wire optional trackers into metrics.
+        self._metrics.set_fill_quality_tracker(self._fill_quality)
+        self._metrics.set_post_only_safety(self._post_only)
 
         # Keep legacy attribute names as aliases for one release cycle.
         self._level_pof_until = self._post_only.pof_until
@@ -748,6 +807,11 @@ class MarketMakerStrategy:
                             zombie.level,
                         )
                         await self._orders.cancel_order(zombie.external_id)
+
+                # --- POF-spread correlation update ---
+                placement_stats_60s = self._orders.failure_window_stats(60.0)
+                total_placements_60s = int(placement_stats_60s["attempts"])
+                self._post_only.update_pof_offset_boost(total_placements_60s)
 
                 # --- Failure rate circuit breaker ---
                 window_stats = self._orders.failure_window_stats(failure_window_s)

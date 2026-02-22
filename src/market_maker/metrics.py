@@ -12,9 +12,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Optional
+from typing import Dict, Optional
 
 from .account_stream import AccountStreamManager
 from .order_manager import OrderManager
@@ -25,6 +25,17 @@ from .trade_journal import TradeJournal
 logger = logging.getLogger(__name__)
 
 _STATUS_LOG_INTERVAL_S = 60.0  # log a summary every N seconds
+
+
+@dataclass
+class LevelFillQualitySnapshot:
+    """Per-level fill quality metrics."""
+
+    avg_edge_bps: Decimal = Decimal("0")
+    avg_markout_1s: Decimal = Decimal("0")
+    avg_markout_5s: Decimal = Decimal("0")
+    adverse_fill_pct: Decimal = Decimal("0")
+    sample_count: int = 0
 
 
 @dataclass
@@ -45,6 +56,11 @@ class StrategySnapshot:
     consecutive_failures: int = 0
     circuit_open: bool = False
     uptime_s: float = 0.0
+    avg_placement_latency_ms: float = 0.0
+    pof_offset_boost_bps: Decimal = Decimal("0")
+    level_fill_quality: Dict[str, LevelFillQualitySnapshot] = field(
+        default_factory=dict
+    )
 
 
 class MetricsCollector:
@@ -72,6 +88,18 @@ class MetricsCollector:
         # External flag set by strategy
         self.circuit_open: bool = False
 
+        # Optional fill quality tracker (set by strategy after construction)
+        self._fill_quality = None
+
+        # Optional post_only safety (for POF offset boost)
+        self._post_only = None
+
+    def set_fill_quality_tracker(self, tracker) -> None:
+        self._fill_quality = tracker
+
+    def set_post_only_safety(self, post_only) -> None:
+        self._post_only = post_only
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -97,6 +125,22 @@ class MetricsCollector:
         ask = self._ob.best_ask()
         m = self._stream.metrics
 
+        level_quality: Dict[str, LevelFillQualitySnapshot] = {}
+        if self._fill_quality is not None:
+            for key, fq in self._fill_quality.all_level_qualities().items():
+                str_key = f"{key[0]}_L{key[1]}"
+                level_quality[str_key] = LevelFillQualitySnapshot(
+                    avg_edge_bps=fq.avg_edge_bps,
+                    avg_markout_1s=fq.avg_markout_1s,
+                    avg_markout_5s=fq.avg_markout_5s,
+                    adverse_fill_pct=fq.adverse_fill_pct,
+                    sample_count=fq.sample_count,
+                )
+
+        pof_boost = Decimal("0")
+        if self._post_only is not None:
+            pof_boost = self._post_only.pof_offset_boost_bps
+
         return StrategySnapshot(
             timestamp=time.time(),
             position=self._risk.get_current_position(),
@@ -112,6 +156,9 @@ class MetricsCollector:
             consecutive_failures=self._orders.consecutive_failures,
             circuit_open=self.circuit_open,
             uptime_s=time.monotonic() - self._start_ts,
+            avg_placement_latency_ms=self._orders.avg_placement_latency_ms(),
+            pof_offset_boost_bps=pof_boost,
+            level_fill_quality=level_quality,
         )
 
     # ------------------------------------------------------------------
@@ -129,7 +176,7 @@ class MetricsCollector:
                 logger.info(
                     "STATUS | pos=%s | bid=%s ask=%s spread=%s | "
                     "orders=%d | fills=%d cancel=%d reject=%d pof=%d | "
-                    "fees=%s | fails=%d cb=%s | uptime=%.0fs",
+                    "fees=%s | fails=%d cb=%s | latency=%.0fms pof_boost=%sbps | uptime=%.0fs",
                     snap.position,
                     snap.best_bid or "N/A",
                     snap.best_ask or "N/A",
@@ -142,8 +189,23 @@ class MetricsCollector:
                     snap.total_fees,
                     snap.consecutive_failures,
                     "OPEN" if snap.circuit_open else "closed",
+                    snap.avg_placement_latency_ms,
+                    snap.pof_offset_boost_bps,
                     snap.uptime_s,
                 )
+                # Log per-level fill quality if available.
+                for level_key, fq in snap.level_fill_quality.items():
+                    if fq.sample_count > 0:
+                        logger.info(
+                            "  FILL_QUALITY %s | edge=%.1fbps markout_1s=%.1fbps "
+                            "markout_5s=%.1fbps adverse=%.0f%% samples=%d",
+                            level_key,
+                            fq.avg_edge_bps,
+                            fq.avg_markout_1s,
+                            fq.avg_markout_5s,
+                            fq.adverse_fill_pct,
+                            fq.sample_count,
+                        )
                 if self._journal is not None:
                     self._journal.record_snapshot(
                         position=snap.position,
