@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import sys
 import time
-from collections import deque
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -49,10 +48,9 @@ _orders_mod.OpenOrderModel = object
 OrderSide = _orders_mod.OrderSide
 OrderStatus = _orders_mod.OrderStatus
 
+from market_maker.fill_quality import FillQualityTracker  # noqa: E402
 from market_maker.order_manager import OrderManager  # noqa: E402
 from market_maker.post_only_safety import PostOnlySafety  # noqa: E402
-from market_maker.fill_quality import FillQualityTracker, LevelFillQuality  # noqa: E402
-
 
 # ===========================================================================
 # Helpers

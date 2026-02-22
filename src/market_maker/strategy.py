@@ -190,7 +190,7 @@ class MarketMakerStrategy:
     @staticmethod
     def _sanitized_run_config(settings: MarketMakerSettings) -> Dict[str, Any]:
         """Return a config snapshot safe to persist in journals."""
-        data = settings.model_dump(mode="python")
+        data: Dict[str, Any] = settings.model_dump(mode="python")
         redact_keys = {
             "vault_id",
             "stark_private_key",

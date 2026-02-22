@@ -59,15 +59,13 @@ _orders_mod.OpenOrderModel = object
 OrderSide = _orders_mod.OrderSide
 OrderStatus = _orders_mod.OrderStatus
 
-from market_maker.order_manager import OrderManager  # noqa: E402
 from market_maker.account_stream import (  # noqa: E402
-    AccountStreamManager,
-    AccountStreamMetrics,
     _STREAM_BACKOFF_BASE_S,
     _STREAM_BACKOFF_MAX_S,
     _STREAM_JITTER_MAX_S,
+    AccountStreamManager,
 )
-
+from market_maker.order_manager import OrderManager  # noqa: E402
 
 # ===========================================================================
 # Helpers
@@ -237,7 +235,7 @@ async def test_rate_limiter_blocks_when_exhausted():
     # We need to patch the timeout to be very short
     with patch.object(mgr, "_rate_semaphore") as mock_sem:
         mock_sem.acquire = AsyncMock(side_effect=asyncio.TimeoutError())
-        ext_id = await mgr.place_order(
+        await mgr.place_order(
             side=OrderSide.BUY, price=Decimal("10"), size=Decimal("1"), level=0
         )
         # Since we patched the semaphore.acquire to always timeout, this

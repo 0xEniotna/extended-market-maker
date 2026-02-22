@@ -9,11 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +47,7 @@ class FillQualityTracker:
             lambda: deque(maxlen=_MAX_SAMPLES_PER_LEVEL)
         )
         # Callback for automatic offset widening on poor markout.
-        self._offset_widen_callback: Optional[object] = None
+        self._offset_widen_callback: Optional[Callable] = None
 
     def set_offset_widen_callback(self, cb) -> None:
         """Register a callback(key, reason) for auto-widening."""
@@ -181,10 +180,10 @@ class FillQualityTracker:
         ap = getattr(ask, "price", None)
         if bp is None or ap is None or bp <= 0 or ap <= 0:
             return None
-        return (bp + ap) / 2
+        return Decimal(str((bp + ap) / 2))
 
     @staticmethod
-    def _avg(samples) -> Decimal:
+    def _avg(samples: deque) -> Decimal:
         if not samples:
             return Decimal("0")
-        return sum(samples) / Decimal(str(len(samples)))
+        return Decimal(str(sum(samples) / Decimal(str(len(samples)))))

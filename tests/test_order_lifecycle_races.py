@@ -9,14 +9,13 @@ Covers:
 """
 from __future__ import annotations
 
-import asyncio
 import sys
 import time
 from collections import deque
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Set
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -63,9 +62,9 @@ _positions_mod.PositionModel = object
 _positions_mod.PositionSide = SimpleNamespace(SHORT="SHORT", LONG="LONG")
 _positions_mod.PositionStatus = SimpleNamespace(CLOSED="CLOSED", OPENED="OPENED")
 
-from market_maker.order_manager import OrderInfo, OrderManager  # noqa: E402
-from market_maker.strategy_callbacks import on_fill, on_level_freed  # noqa: E402
 from market_maker.account_stream import FillEvent  # noqa: E402
+from market_maker.order_manager import OrderInfo, OrderManager  # noqa: E402
+from market_maker.strategy_callbacks import on_fill  # noqa: E402
 
 OrderSide = _orders_mod.OrderSide
 OrderStatus = _orders_mod.OrderStatus

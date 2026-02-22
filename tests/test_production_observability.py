@@ -15,29 +15,24 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import pytest
+import pytest  # noqa: F401
 
 from market_maker.trade_journal import (
-    TradeJournal,
-    _BATCH_FSYNC_INTERVAL_S,
     _BATCH_FSYNC_INTERVAL_WRITES,
     _CRITICAL_EVENT_TYPES,
+    TradeJournal,
 )
-
-# Import analyse helpers
-import importlib
-import sys
 
 # Ensure scripts directory is importable
 _scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(_scripts_dir))
-import analyse_mm_journal as analyser
-
+import analyse_mm_journal as analyser  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -218,7 +213,7 @@ class TestFsyncBehaviour:
 
     def test_non_critical_events_batch_fsync(self, journal: TradeJournal):
         """Non-critical events should not fsync on every write."""
-        with patch("os.fsync") as mock_fsync:
+        with patch("os.fsync") as _mock_fsync:
             journal.record_snapshot(
                 position=Decimal("0"),
                 best_bid=Decimal("100"),
@@ -229,11 +224,8 @@ class TestFsyncBehaviour:
                 total_fees=Decimal("0"),
                 circuit_open=False,
             )
-            # First non-critical write should not fsync (unless time threshold)
-            # Actually, it depends on time since last fsync. The journal initializes
-            # _last_fsync_ts at creation time. So if time elapsed < threshold,
-            # a single write shouldn't trigger.
-            # Let's just verify it's called less than for critical events.
+            # Verify the test runs without error; fsync batching is tested
+            # more thoroughly in test_batch_fsync_after_n_writes.
 
     def test_batch_fsync_after_n_writes(self, journal: TradeJournal):
         """After _BATCH_FSYNC_INTERVAL_WRITES non-critical writes, fsync should trigger."""
@@ -661,18 +653,15 @@ class TestLatestSymlink:
         """Creating a second journal for same market should update symlink."""
         j1 = TradeJournal("SYMTEST", journal_dir, run_id="s1")
         link = journal_dir / "mm_SYMTEST_latest.jsonl"
-        target1 = os.readlink(link)
+        os.readlink(link)  # Verify symlink exists
         j1.close()
 
         # Ensure different timestamp
-        import time
         time.sleep(0.01)
         j2 = TradeJournal("SYMTEST", journal_dir, run_id="s2")
-        target2 = os.readlink(link)
         j2.close()
 
-        # May or may not have same timestamp-based name, but symlink should
-        # point to j2's file
+        # Symlink should point to j2's file
         assert os.readlink(link) == j2.path.name
 
 

@@ -13,9 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-import time
 from decimal import Decimal
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -58,8 +56,8 @@ _positions_mod.PositionModel = object
 _positions_mod.PositionSide = SimpleNamespace(SHORT="SHORT", LONG="LONG")
 _positions_mod.PositionStatus = SimpleNamespace(CLOSED="CLOSED", OPENED="OPENED")
 
-from market_maker.order_manager import FlattenResult, OrderManager  # noqa: E402
 from market_maker import strategy_runner  # noqa: E402
+from market_maker.order_manager import FlattenResult, OrderManager  # noqa: E402
 from market_maker.strategy_runner import (  # noqa: E402
     RuntimeContext,
     _attempt_shutdown_flatten,
@@ -67,7 +65,6 @@ from market_maker.strategy_runner import (  # noqa: E402
     _shutdown_core,
     _write_json_state,
     _write_pre_shutdown_state,
-    _write_emergency_state,
 )
 
 OrderSide = _orders_mod.OrderSide
@@ -334,8 +331,6 @@ class TestShutdownTimeout:
         )
 
         # Make _shutdown_core hang
-        original_core = strategy_runner._shutdown_core
-
         async def _slow_core(ctx, tasks):
             await asyncio.sleep(10)  # Way longer than timeout
 
@@ -599,7 +594,7 @@ class TestFreshRESTVerification:
 
         import logging
         with caplog.at_level(logging.CRITICAL):
-            result = await _attempt_shutdown_flatten(ctx, "shutdown")
+            await _attempt_shutdown_flatten(ctx, "shutdown")
 
         # Position is still 5 (mock never returns 0)
         assert any("POSITION NOT FLAT" in r.message for r in caplog.records)

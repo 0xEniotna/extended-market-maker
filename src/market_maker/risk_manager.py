@@ -226,7 +226,7 @@ class RiskManager:
             return None
         if bid.price <= 0 or ask.price <= 0:
             return None
-        return (bid.price + ask.price) / 2
+        return Decimal(str((bid.price + ask.price) / 2))
 
     def _is_balance_stale(self) -> bool:
         """Return True if cached balance is older than staleness threshold."""

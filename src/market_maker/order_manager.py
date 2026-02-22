@@ -18,7 +18,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from x10.perpetual.orders import (
     OpenOrderModel,
@@ -326,14 +326,14 @@ class OrderManager:
             return
 
         # Find by external_id
-        info = self._active_orders.pop(ext_id, None)
+        removed = self._active_orders.pop(ext_id, None)
         # Also clear from pending_cancel if present.
         self._pending_cancel.pop(ext_id, None)
-        if info is None:
+        if removed is None:
             return
-        self._recent_orders_by_external_id[info.external_id] = info
-        if info.exchange_order_id:
-            self._orders_by_exchange_id[info.exchange_order_id] = info
+        self._recent_orders_by_external_id[removed.external_id] = removed
+        if removed.exchange_order_id:
+            self._orders_by_exchange_id[removed.exchange_order_id] = removed
 
         is_rejected = order.status == OrderStatus.REJECTED
         if is_rejected:
@@ -343,8 +343,8 @@ class OrderManager:
         logger.info(
             "Order %s (ext_id=%s, level=%d) reached terminal status: %s",
             order.status,
-            info.external_id,
-            info.level,
+            removed.external_id,
+            removed.level,
             order.status,
         )
 
@@ -353,13 +353,13 @@ class OrderManager:
         for cb in self._level_freed_callbacks:
             try:
                 cb(
-                    str(info.side),
-                    info.level,
-                    info.external_id,
+                    str(removed.side),
+                    removed.level,
+                    removed.external_id,
                     rejected=is_rejected,
                     status=str(order.status),
                     reason=str(status_reason) if status_reason is not None else None,
-                    price=info.price,
+                    price=removed.price,
                 )
             except Exception as exc:
                 logger.error("level_freed callback error: %s", exc)
@@ -465,7 +465,7 @@ class OrderManager:
                     info.exchange_order_id = exchange_id
                     self._orders_by_exchange_id[exchange_id] = info
             else:
-                info = self._pending_placements.pop(external_id, None) or pending_info
+                info = self._pending_placements.pop(external_id, None) or pending_info  # type: ignore[arg-type]
                 if exchange_id is not None:
                     info.exchange_order_id = exchange_id
                 self._active_orders[external_id] = info
@@ -942,7 +942,7 @@ class OrderManager:
     @staticmethod
     async def _wait_for_position_change(
         *,
-        risk_mgr,
+        risk_mgr: Any,
         initial_position: Decimal,
         timeout_s: float,
         poll_interval_s: float = 0.25,
@@ -950,7 +950,7 @@ class OrderManager:
         """Poll risk_mgr position until it differs from *initial_position* or timeout."""
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
-            current = risk_mgr.get_current_position()
+            current: Decimal = risk_mgr.get_current_position()
             if current != initial_position:
                 logger.info(
                     "Flatten fill confirmed: position moved %s -> %s",
@@ -967,7 +967,7 @@ class OrderManager:
                 timeout_s,
                 current,
             )
-        return current
+        return Decimal(str(current))
 
     def _record_attempt(self) -> None:
         self._attempt_timestamps.append(time.monotonic())
