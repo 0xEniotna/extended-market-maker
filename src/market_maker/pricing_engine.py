@@ -174,7 +174,7 @@ class PricingEngine:
         scale = self._to_decimal(self._settings.size_scale_per_level, default="1")
         if scale == 1 or level == 0:
             return self._base_order_size
-        return (self._base_order_size * scale ** level).quantize(
-            self._min_order_size_step,
-            rounding=ROUND_DOWN,
-        )
+        raw = self._base_order_size * scale ** level
+        return (raw / self._min_order_size_step).quantize(
+            Decimal("1"), rounding=ROUND_DOWN,
+        ) * self._min_order_size_step

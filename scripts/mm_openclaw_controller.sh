@@ -9,12 +9,11 @@ JOURNAL_DIR="${REPO_ROOT}/data/mm_journal"
 BASE_ENV="${BASE_ENV:-.env.cop}"
 CONTROLLER_ID="${CONTROLLER_ID:-}"
 ITERATIONS="${ITERATIONS:-999999}"
-ADVISOR_INTERVAL="${ADVISOR_INTERVAL:-1800}"
-JOBS_JSON="${JOBS_JSON:-/home/flexouille/.openclaw/cron/jobs.json}"
-DEADMAN_WINDOW_S="${DEADMAN_WINDOW_S:-3600}"
-DEADMAN_COOLDOWN_S="${DEADMAN_COOLDOWN_S:-1800}"
-INVENTORY_WINDOW_S="${INVENTORY_WINDOW_S:-7200}"
-MAX_CHANGES_PER_HOUR="${MAX_CHANGES_PER_HOUR:-10}"
+ANALYSIS_INTERVAL="${ANALYSIS_INTERVAL:-60}"
+MIN_FILLS="${MIN_FILLS:-10}"
+ASSUMED_FEE_BPS="${ASSUMED_FEE_BPS:-0}"
+MAX_RUN_SECONDS="${MAX_RUN_SECONDS:-0}"
+ALLOW_MAINNET="${ALLOW_MAINNET:-1}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 
 if [[ -z "${PYTHON_BIN}" ]]; then
@@ -48,12 +47,11 @@ Config via env vars:
   BASE_ENV=.env.cop
   CONTROLLER_ID=amzn
   ITERATIONS=999999
-  ADVISOR_INTERVAL=1800
-  JOBS_JSON=/home/flexouille/.openclaw/cron/jobs.json
-  DEADMAN_WINDOW_S=3600
-  DEADMAN_COOLDOWN_S=1800
-  INVENTORY_WINDOW_S=7200
-  MAX_CHANGES_PER_HOUR=10
+  ANALYSIS_INTERVAL=60
+  MIN_FILLS=10
+  ASSUMED_FEE_BPS=0
+  MAX_RUN_SECONDS=0
+  ALLOW_MAINNET=1
   PYTHON_BIN=python3
   # Defaults to repo .venv python when present.
 EOF
@@ -80,20 +78,8 @@ start_controller() {
   fi
 
   cd "${REPO_ROOT}"
-  local cmd=(
-    "${PYTHON_BIN}" scripts/mm_advisor_loop.py
-    --repo "${REPO_ROOT}"
-    --env-path "${BASE_ENV}"
-    --iterations "${ITERATIONS}"
-    --sleep-s "${ADVISOR_INTERVAL}"
-    --jobs-json "${JOBS_JSON}"
-    --deadman-window-s "${DEADMAN_WINDOW_S}"
-    --deadman-cooldown-s "${DEADMAN_COOLDOWN_S}"
-    --inventory-window-s "${INVENTORY_WINDOW_S}"
-    --max-changes-per-hour "${MAX_CHANGES_PER_HOUR}"
-  )
-
-  nohup "${cmd[@]}" >> "${LOG_FILE}" 2>&1 &
+  # Source env vars and launch market maker directly (no autotune)
+  nohup bash -c "set -a; source '${BASE_ENV}'; set +a; exec '${PYTHON_BIN}' scripts/run_market_maker.py" >> "${LOG_FILE}" 2>&1 &
   echo "$!" > "${PID_FILE}"
   echo "Controller started (pid=$!, log=${LOG_FILE})."
 }

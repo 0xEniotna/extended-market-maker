@@ -435,7 +435,9 @@ class MarketMakerStrategy:
             return Decimal("0")
         if self._min_order_size_step <= 0:
             return size
-        return size.quantize(self._min_order_size_step, rounding=ROUND_DOWN)
+        return (size / self._min_order_size_step).quantize(
+            Decimal("1"), rounding=ROUND_DOWN
+        ) * self._min_order_size_step
 
     def _effective_safety_ticks(self, key: tuple[str, int]) -> int:
         avg_latency_ms = self._orders.avg_placement_latency_ms()
