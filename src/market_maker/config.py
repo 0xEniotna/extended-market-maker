@@ -714,6 +714,26 @@ class MarketMakerSettings(BaseSettings):
         ),
     )
 
+    # --- Network resilience ---
+    max_orders_per_second: float = Field(
+        default=10.0,
+        gt=0,
+        le=100,
+        description=(
+            "Maximum order placements per second (token-bucket rate limiter). "
+            "Prevents burst placement after circuit breaker reset or startup."
+        ),
+    )
+    maintenance_pause_s: float = Field(
+        default=60.0,
+        ge=0,
+        le=600,
+        description=(
+            "Seconds to pause all quoting after detecting exchange maintenance "
+            "(HTTP 503). Cancels resting orders on entry."
+        ),
+    )
+
     # --- Logging ---
     log_level: str = Field(default="INFO", description="Log level")
     journal_reprice_decisions: bool = Field(

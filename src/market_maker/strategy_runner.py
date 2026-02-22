@@ -161,7 +161,12 @@ def _build_runtime_context(
     order_size: Decimal,
 ) -> RuntimeContext:
     ob_mgr = OrderbookManager(settings.endpoint_config, settings.market_name)
-    order_mgr = OrderManager(trading_client, settings.market_name)
+    order_mgr = OrderManager(
+        trading_client,
+        settings.market_name,
+        max_orders_per_second=settings.max_orders_per_second,
+        maintenance_pause_s=settings.maintenance_pause_s,
+    )
     risk_mgr = RiskManager(
         trading_client,
         settings.market_name,
@@ -245,18 +250,26 @@ def _register_callbacks(ctx: RuntimeContext) -> None:
     ctx.account_stream.on_balance_update(ctx.risk_mgr.handle_balance_update)
     ctx.order_mgr.on_level_freed(ctx.strategy._on_level_freed)
     ctx.account_stream.on_fill(ctx.strategy._on_fill)
+    # Wire cross-references for health monitoring and event logging.
+    ctx.account_stream.set_order_manager(ctx.order_mgr)
+    ctx.account_stream.set_journal(ctx.journal)
+    ctx.order_mgr.set_journal(ctx.journal)
 
 
 async def _start_services(ctx: RuntimeContext) -> None:
     await ctx.ob_mgr.start()
     await ctx.account_stream.start()
     await ctx.metrics.start()
+    ctx.order_mgr.start_rate_limiter()
 
 
 async def _stop_services(ctx: RuntimeContext) -> None:
     await ctx.metrics.stop()
+    await ctx.order_mgr.stop_rate_limiter()
     await ctx.account_stream.stop()
     await ctx.ob_mgr.stop()
+    # Wait for in-flight order operations to complete before closing.
+    await ctx.order_mgr.wait_for_inflight(timeout_s=5.0)
     await ctx.trading_client.close()
 
 

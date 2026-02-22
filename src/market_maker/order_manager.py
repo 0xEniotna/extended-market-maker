@@ -80,10 +80,17 @@ class OrderManager:
     Places and cancels limit orders, tracking them by external_id.
     """
 
+    # HTTP status codes / error strings that indicate exchange maintenance.
+    _MAINTENANCE_CODES = frozenset({503, "503"})
+    _MAINTENANCE_ERROR_PATTERNS = ("maintenance", "service unavailable", "503")
+
     def __init__(
         self,
         trading_client: PerpetualTradingClient,
         market_name: str,
+        *,
+        max_orders_per_second: float = 10.0,
+        maintenance_pause_s: float = 60.0,
     ) -> None:
         self._client = trading_client
         self._market_name = market_name
@@ -112,6 +119,159 @@ class OrderManager:
         self._latency_samples: deque[float] = deque(maxlen=50)
         # Map ext_id → monotonic send time for orders awaiting first stream ack.
         self._placement_send_ts: Dict[str, float] = {}
+
+        # --- Rate limiter (token-bucket via semaphore) ---
+        self._max_orders_per_second = max(0.1, max_orders_per_second)
+        self._rate_tokens = int(max(1, max_orders_per_second))
+        self._rate_semaphore: asyncio.Semaphore = asyncio.Semaphore(self._rate_tokens)
+        self._rate_replenish_task: Optional[asyncio.Task] = None
+
+        # --- Exchange maintenance detection ---
+        self._maintenance_pause_s = maintenance_pause_s
+        self._maintenance_until: float = 0.0
+
+        # --- In-flight operation tracking (for graceful session close) ---
+        self._inflight_count: int = 0
+        self._inflight_zero_event: asyncio.Event = asyncio.Event()
+        self._inflight_zero_event.set()  # Initially no in-flight ops
+
+        # Optional journal reference for event recording.
+        self._journal: Optional[object] = None
+
+    # ------------------------------------------------------------------
+    # Configuration
+    # ------------------------------------------------------------------
+
+    def set_journal(self, journal: object) -> None:
+        self._journal = journal
+
+    # ------------------------------------------------------------------
+    # Rate limiter lifecycle
+    # ------------------------------------------------------------------
+
+    def start_rate_limiter(self) -> None:
+        """Start the background token replenishment task."""
+        if self._rate_replenish_task is None:
+            self._rate_replenish_task = asyncio.create_task(
+                self._replenish_tokens(), name="mm-rate-limiter"
+            )
+
+    async def stop_rate_limiter(self) -> None:
+        """Stop the rate limiter replenishment task."""
+        if self._rate_replenish_task is not None:
+            self._rate_replenish_task.cancel()
+            try:
+                await self._rate_replenish_task
+            except asyncio.CancelledError:
+                pass
+            self._rate_replenish_task = None
+
+    async def _replenish_tokens(self) -> None:
+        """Replenish one rate-limit token per interval."""
+        interval = 1.0 / self._max_orders_per_second
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                # Only release if below the max to avoid token accumulation.
+                if self._rate_semaphore._value < self._rate_tokens:
+                    self._rate_semaphore.release()
+            except asyncio.CancelledError:
+                return
+
+    # ------------------------------------------------------------------
+    # Maintenance state
+    # ------------------------------------------------------------------
+
+    @property
+    def in_maintenance(self) -> bool:
+        """Return True if the exchange is believed to be in maintenance."""
+        return time.monotonic() < self._maintenance_until
+
+    @property
+    def maintenance_remaining_s(self) -> float:
+        """Seconds remaining in maintenance pause, or 0 if not in maintenance."""
+        return max(0.0, self._maintenance_until - time.monotonic())
+
+    def _check_maintenance_response(self, resp=None, exc: Optional[Exception] = None) -> bool:
+        """Return True and enter maintenance state if response/exception indicates 503."""
+        # Check response object
+        if resp is not None:
+            status_code = getattr(resp, "status_code", getattr(resp, "status", None))
+            if status_code in self._MAINTENANCE_CODES:
+                self._enter_maintenance("http_503")
+                return True
+            error = getattr(resp, "error", None)
+            if error is not None and self._is_maintenance_error(str(error)):
+                self._enter_maintenance(f"error:{error}")
+                return True
+        # Check exception
+        if exc is not None:
+            exc_str = str(exc).lower()
+            if any(p in exc_str for p in self._MAINTENANCE_ERROR_PATTERNS):
+                self._enter_maintenance(f"exception:{exc}")
+                return True
+            # Check for HTTP 503 in exception attributes
+            status_code = getattr(exc, "status_code", getattr(exc, "status", None))
+            if status_code in self._MAINTENANCE_CODES:
+                self._enter_maintenance(f"exception_status:{status_code}")
+                return True
+        return False
+
+    @staticmethod
+    def _is_maintenance_error(error_str: str) -> bool:
+        lower = error_str.lower()
+        return any(p in lower for p in OrderManager._MAINTENANCE_ERROR_PATTERNS)
+
+    def _enter_maintenance(self, reason: str) -> None:
+        """Enter maintenance pause state."""
+        self._maintenance_until = time.monotonic() + self._maintenance_pause_s
+        logger.warning(
+            "Exchange maintenance detected for market=%s: reason=%s — "
+            "pausing order placement for %.0fs",
+            self._market_name, reason, self._maintenance_pause_s,
+        )
+        # Journal the event
+        if self._journal is not None:
+            record_fn = getattr(self._journal, "record_exchange_event", None)
+            if record_fn is not None:
+                record_fn(
+                    event_type="exchange_maintenance",
+                    details={
+                        "reason": reason,
+                        "pause_s": self._maintenance_pause_s,
+                        "market": self._market_name,
+                    },
+                )
+
+    # ------------------------------------------------------------------
+    # In-flight operation tracking
+    # ------------------------------------------------------------------
+
+    def _begin_inflight(self) -> None:
+        self._inflight_count += 1
+        self._inflight_zero_event.clear()
+
+    def _end_inflight(self) -> None:
+        self._inflight_count = max(0, self._inflight_count - 1)
+        if self._inflight_count == 0:
+            self._inflight_zero_event.set()
+
+    async def wait_for_inflight(self, timeout_s: float = 5.0) -> bool:
+        """Wait up to *timeout_s* for all in-flight operations to complete.
+
+        Returns True if all operations completed, False on timeout.
+        """
+        try:
+            await asyncio.wait_for(
+                self._inflight_zero_event.wait(), timeout=timeout_s,
+            )
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Timed out waiting for %d in-flight operations after %.1fs",
+                self._inflight_count, timeout_s,
+            )
+            return False
 
     # ------------------------------------------------------------------
     # Callback registration
@@ -219,7 +379,26 @@ class OrderManager:
         Place a post-only limit order.
 
         Returns the external_id on success, None on failure.
+        Respects the rate limiter and exchange maintenance state.
         """
+        # --- Maintenance gate ---
+        if self.in_maintenance:
+            logger.debug(
+                "Skipping order placement during maintenance (%.0fs remaining)",
+                self.maintenance_remaining_s,
+            )
+            return None
+
+        # --- Rate limiter ---
+        try:
+            await asyncio.wait_for(self._rate_semaphore.acquire(), timeout=2.0)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Rate limiter timeout: order placement throttled for market=%s",
+                self._market_name,
+            )
+            return None
+
         external_id = self._generate_external_id()
 
         # Register in pending_placements *before* the await so that
@@ -236,6 +415,7 @@ class OrderManager:
         self._placement_send_ts[external_id] = time.monotonic()
 
         self._record_attempt()
+        self._begin_inflight()
         try:
             resp = await self._client.place_order(
                 market_name=self._market_name,
@@ -247,6 +427,14 @@ class OrderManager:
                 post_only=True,
                 external_id=external_id,
             )
+
+            # --- Maintenance detection on response ---
+            if self._check_maintenance_response(resp=resp):
+                self._pending_placements.pop(external_id, None)
+                self._placement_send_ts.pop(external_id, None)
+                # Best-effort cancel resting orders during maintenance.
+                asyncio.create_task(self._maintenance_cancel_orders())
+                return None
 
             # Validate SDK response status
             if hasattr(resp, "status") and hasattr(resp, "error"):
@@ -301,6 +489,13 @@ class OrderManager:
             return external_id
 
         except Exception as exc:
+            # --- Maintenance detection on exception ---
+            if self._check_maintenance_response(exc=exc):
+                self._pending_placements.pop(external_id, None)
+                self._placement_send_ts.pop(external_id, None)
+                asyncio.create_task(self._maintenance_cancel_orders())
+                return None
+
             self.consecutive_failures += 1
             self._record_failure()
             self._pending_placements.pop(external_id, None)
@@ -314,6 +509,8 @@ class OrderManager:
                 exc,
             )
             return None
+        finally:
+            self._end_inflight()
 
     async def cancel_order(self, external_id: str) -> bool:
         """Cancel a single order by its external_id."""
@@ -321,6 +518,7 @@ class OrderManager:
         if info is None:
             return False
 
+        self._begin_inflight()
         try:
             await self._client.orders.cancel_order_by_external_id(
                 order_external_id=external_id,
@@ -342,6 +540,8 @@ class OrderManager:
                 exc,
             )
             return False
+        finally:
+            self._end_inflight()
 
     async def cancel_all_orders(self) -> None:
         """Cancel every order for this market using mass-cancel (single API call).
@@ -351,6 +551,7 @@ class OrderManager:
         cancellation.  A timeout sweeper (``sweep_pending_cancels``) handles
         stragglers that never receive a stream confirmation.
         """
+        self._begin_inflight()
         try:
             now = time.monotonic()
             for ext_id in list(self._active_orders):
@@ -376,6 +577,8 @@ class OrderManager:
             ext_ids = list(self._active_orders.keys())
             for ext_id in ext_ids:
                 await self.cancel_order(ext_id)
+        finally:
+            self._end_inflight()
 
     def sweep_pending_cancels(
         self,
@@ -689,6 +892,17 @@ class OrderManager:
     def latency_sample_count(self) -> int:
         """Return number of latency samples collected."""
         return len(self._latency_samples)
+
+    async def _maintenance_cancel_orders(self) -> None:
+        """Best-effort cancel all resting orders during maintenance."""
+        try:
+            await self.cancel_all_orders()
+            logger.info(
+                "Cancelled resting orders due to exchange maintenance for %s",
+                self._market_name,
+            )
+        except Exception as exc:
+            logger.error("Failed to cancel orders during maintenance: %s", exc)
 
     # ------------------------------------------------------------------
     # Internal helpers

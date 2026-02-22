@@ -292,6 +292,14 @@ class TradeJournal:
             "action": action,
         })
 
+    def record_exchange_event(
+        self,
+        *,
+        event_type: str,
+        details: dict,
+    ) -> None:
+        self._write(event_type, details)
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
