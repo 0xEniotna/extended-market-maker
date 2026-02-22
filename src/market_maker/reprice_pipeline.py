@@ -238,11 +238,18 @@ class RepricePipeline:
             return None
 
         current_best = bid.price if str(side).endswith("BUY") or str(side) == "BUY" else ask.price
+
+        # Fold in POF-spread correlation boost if available.
+        pof_boost = Decimal("0")
+        post_only = getattr(strategy, "_post_only", None)
+        if post_only is not None:
+            pof_boost = post_only.pof_offset_boost_bps
+
         return QuoteInputs(
             bid=bid,
             ask=ask,
             spread_bps=spread_bps,
-            extra_offset_bps=guard.extra_offset_bps,
+            extra_offset_bps=guard.extra_offset_bps + pof_boost,
             current_best=current_best,
         )
 

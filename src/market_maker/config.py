@@ -171,6 +171,22 @@ class MarketMakerSettings(BaseSettings):
         gt=0,
         description="Maximum absolute position size (in contracts)",
     )
+    max_long_position_size: Decimal = Field(
+        default=Decimal("0"),
+        ge=0,
+        description=(
+            "Maximum long position size (contracts). "
+            "0 falls back to the symmetric max_position_size."
+        ),
+    )
+    max_short_position_size: Decimal = Field(
+        default=Decimal("0"),
+        ge=0,
+        description=(
+            "Maximum short position size (contracts). "
+            "0 falls back to the symmetric max_position_size."
+        ),
+    )
     max_order_notional_usd: Decimal = Field(
         default=Decimal("250"),
         ge=0,
@@ -184,6 +200,14 @@ class MarketMakerSettings(BaseSettings):
         ge=0,
         description=(
             "Maximum absolute position notional (USD). "
+            "0 disables this cap."
+        ),
+    )
+    gross_exposure_limit_usd: Decimal = Field(
+        default=Decimal("0"),
+        ge=0,
+        description=(
+            "Maximum gross exposure = abs(position * ref_price) + sum(active order notionals). "
             "0 disables this cap."
         ),
     )
@@ -215,6 +239,15 @@ class MarketMakerSettings(BaseSettings):
         ge=Decimal("0"),
         description=(
             "Absolute collateral buffer to keep untouched before sizing new orders."
+        ),
+    )
+    balance_staleness_max_s: float = Field(
+        default=30.0,
+        ge=0,
+        description=(
+            "Maximum age (seconds) of cached balance before it is treated as stale. "
+            "When stale, balance-aware sizing is skipped rather than using outdated data. "
+            "0 disables staleness checking."
         ),
     )
     reprice_tolerance_percent: Decimal = Field(
@@ -271,6 +304,15 @@ class MarketMakerSettings(BaseSettings):
         ge=0,
         description=(
             "Reset adaptive POF streak if no POF rejection occurs within this window."
+        ),
+    )
+
+    min_acceptable_markout_bps: Decimal = Field(
+        default=Decimal("-2"),
+        description=(
+            "Minimum acceptable 5-second markout (bps) per level. "
+            "If a level's rolling average drops below this, its offset "
+            "is automatically widened by 1 tick."
         ),
     )
 
@@ -626,8 +668,25 @@ class MarketMakerSettings(BaseSettings):
         default=Decimal("20"),
         ge=0,
         description=(
-            "Price aggressiveness (bps) used for shutdown flatten orders. "
+            "Initial price aggressiveness (bps) used for shutdown flatten orders. "
             "Higher values increase fill probability."
+        ),
+    )
+    shutdown_flatten_slippage_step_bps: Decimal = Field(
+        default=Decimal("10"),
+        ge=0,
+        description=(
+            "Additional slippage added per flatten retry (progressive slippage). "
+            "Attempt 1 uses shutdown_flatten_slippage_bps, "
+            "attempt 2 uses +step, etc."
+        ),
+    )
+    shutdown_flatten_max_slippage_bps: Decimal = Field(
+        default=Decimal("100"),
+        ge=0,
+        description=(
+            "Maximum slippage (bps) for shutdown flatten orders, "
+            "capping the progressive slippage escalation."
         ),
     )
     shutdown_flatten_retries: int = Field(
@@ -646,6 +705,34 @@ class MarketMakerSettings(BaseSettings):
             "Delay between shutdown flatten retries."
         ),
     )
+    shutdown_timeout_s: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            "Hard timeout for the entire shutdown sequence. "
+            "If exceeded, writes an emergency state file and force-exits."
+        ),
+    )
+
+    # --- Network resilience ---
+    max_orders_per_second: float = Field(
+        default=10.0,
+        gt=0,
+        le=100,
+        description=(
+            "Maximum order placements per second (token-bucket rate limiter). "
+            "Prevents burst placement after circuit breaker reset or startup."
+        ),
+    )
+    maintenance_pause_s: float = Field(
+        default=60.0,
+        ge=0,
+        le=600,
+        description=(
+            "Seconds to pause all quoting after detecting exchange maintenance "
+            "(HTTP 503). Cancels resting orders on entry."
+        ),
+    )
 
     # --- Logging ---
     log_level: str = Field(default="INFO", description="Log level")
@@ -659,6 +746,16 @@ class MarketMakerSettings(BaseSettings):
         le=20,
         description=(
             "Depth of orderbook levels captured in per-fill market snapshots."
+        ),
+    )
+    journal_max_size_mb: float = Field(
+        default=50.0,
+        ge=0,
+        le=1000,
+        description=(
+            "Maximum journal file size in MB before rotation. "
+            "When exceeded, the current file is closed and a new one opened "
+            "with an incremented suffix. A 'latest' symlink is maintained."
         ),
     )
 

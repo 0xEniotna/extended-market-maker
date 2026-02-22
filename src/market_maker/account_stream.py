@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -27,6 +28,11 @@ from x10.perpetual.trades import AccountTradeModel
 from x10.utils.http import WrappedStreamResponse
 
 logger = logging.getLogger(__name__)
+
+# Backoff constants for account stream reconnection.
+_STREAM_BACKOFF_BASE_S = 2.0
+_STREAM_BACKOFF_MAX_S = 120.0
+_STREAM_JITTER_MAX_S = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -89,12 +95,17 @@ class AccountStreamManager:
         self._market_name = market_name
 
         self._task: Optional[asyncio.Task] = None
+        self._health_task: Optional[asyncio.Task] = None
 
         # Callbacks registered by other components
         self._order_callbacks: List[OrderUpdateCallback] = []
         self._position_callbacks: List[PositionUpdateCallback] = []
         self._fill_callbacks: List[FillCallback] = []
         self._balance_callbacks: List[BalanceUpdateCallback] = []
+
+        # Optional references set by the runner for health monitoring.
+        self._order_mgr: Optional[object] = None
+        self._journal: Optional[object] = None
 
         # Public metrics
         self.metrics = AccountStreamMetrics()
@@ -123,20 +134,33 @@ class AccountStreamManager:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def set_order_manager(self, order_mgr: object) -> None:
+        """Set the order manager reference for connection health monitoring."""
+        self._order_mgr = order_mgr
+
+    def set_journal(self, journal: object) -> None:
+        """Set the trade journal reference for event recording."""
+        self._journal = journal
+
     async def start(self) -> None:
-        """Start the background stream task."""
+        """Start the background stream task and connection health watchdog."""
         self._task = asyncio.create_task(self._stream_loop(), name="mm-account-stream")
+        self._health_task = asyncio.create_task(
+            self._connection_health_watchdog(), name="mm-stream-health"
+        )
         logger.info("Account stream manager started for %s", self._market_name)
 
     async def stop(self) -> None:
-        """Cancel the background stream task."""
-        if self._task is not None:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
+        """Cancel the background stream and health tasks."""
+        for task in (self._task, self._health_task):
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self._task = None
+        self._health_task = None
         logger.info("Account stream manager stopped")
 
     # ------------------------------------------------------------------
@@ -144,20 +168,134 @@ class AccountStreamManager:
     # ------------------------------------------------------------------
 
     async def _stream_loop(self) -> None:
-        """Connect to the account stream and process events.  Reconnects on drop."""
+        """Connect to the account stream and process events.
+
+        Reconnects on drop with exponential backoff and jitter, mirroring
+        the pattern in ``OrderbookManager._reconnect_watchdog``.  Backoff
+        resets after a successful connection delivers at least one event.
+        """
+        consecutive_failures = 0
         while True:
+            got_event = False
             try:
                 async with self._stream_client.subscribe_to_account_updates(
                     self._api_key
                 ) as stream:
                     logger.info("Account stream connected")
+                    consecutive_failures = 0  # connected successfully
                     async for event in stream:
+                        got_event = True
                         await self._handle_event(event)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.error("Account stream error: %s — reconnecting in 2s", exc)
-            await asyncio.sleep(2.0)
+                consecutive_failures += 1
+                backoff = min(
+                    _STREAM_BACKOFF_BASE_S * (2 ** (consecutive_failures - 1)),
+                    _STREAM_BACKOFF_MAX_S,
+                )
+                jitter = random.uniform(0.0, _STREAM_JITTER_MAX_S)
+                delay = backoff + jitter
+                logger.error(
+                    "Account stream error: %s — reconnecting in %.1fs "
+                    "(attempt %d, backoff=%.0fs jitter=%.1fs)",
+                    exc, delay, consecutive_failures, backoff, jitter,
+                )
+                await asyncio.sleep(delay)
+                continue
+
+            # Stream ended cleanly (no exception) — reconnect.
+            if got_event:
+                # Received at least one event: reset backoff.
+                consecutive_failures = 0
+                delay = _STREAM_BACKOFF_BASE_S + random.uniform(0.0, _STREAM_JITTER_MAX_S)
+            else:
+                consecutive_failures += 1
+                backoff = min(
+                    _STREAM_BACKOFF_BASE_S * (2 ** (consecutive_failures - 1)),
+                    _STREAM_BACKOFF_MAX_S,
+                )
+                delay = backoff + random.uniform(0.0, _STREAM_JITTER_MAX_S)
+            logger.warning(
+                "Account stream ended — reconnecting in %.1fs", delay,
+            )
+            await asyncio.sleep(delay)
+
+    # ------------------------------------------------------------------
+    # Connection health watchdog
+    # ------------------------------------------------------------------
+
+    async def _connection_health_watchdog(self) -> None:
+        """Monitor account stream liveness and take protective action.
+
+        - 30s with no event while orders are active → warning log.
+        - 60s with no event while orders are active → cancel_all_orders
+          as a safety measure (we cannot trust order state without stream
+          confirmation).
+        """
+        _WARNING_THRESHOLD_S = 30.0
+        _CANCEL_THRESHOLD_S = 60.0
+        warned = False
+        cancelled = False
+        while True:
+            try:
+                await asyncio.sleep(5.0)
+                last_event_ts = self.metrics.last_event_ts
+                if last_event_ts == 0.0:
+                    # No event received yet (initial startup).
+                    continue
+
+                elapsed = time.monotonic() - last_event_ts
+                has_active_orders = False
+                if self._order_mgr is not None:
+                    count_fn = getattr(self._order_mgr, "active_order_count", None)
+                    if count_fn is not None:
+                        has_active_orders = count_fn() > 0
+
+                if not has_active_orders:
+                    warned = False
+                    cancelled = False
+                    continue
+
+                if elapsed >= _CANCEL_THRESHOLD_S and not cancelled:
+                    logger.critical(
+                        "Account stream silent for %.0fs with %s active orders — "
+                        "cancelling all orders as safety measure",
+                        elapsed,
+                        "unknown" if not has_active_orders else "active",
+                    )
+                    cancel_fn = getattr(self._order_mgr, "cancel_all_orders", None)
+                    if cancel_fn is not None:
+                        await cancel_fn()
+                    if self._journal is not None:
+                        record_fn = getattr(self._journal, "record_exchange_event", None)
+                        if record_fn is not None:
+                            record_fn(
+                                event_type="stream_health_cancel",
+                                details={
+                                    "elapsed_s": elapsed,
+                                    "reason": "account_stream_silent",
+                                },
+                            )
+                    cancelled = True
+                    warned = True
+                elif elapsed >= _WARNING_THRESHOLD_S and not warned:
+                    logger.warning(
+                        "Account stream silent for %.0fs with active orders — "
+                        "order state may be stale",
+                        elapsed,
+                    )
+                    warned = True
+
+                if elapsed < _WARNING_THRESHOLD_S:
+                    warned = False
+                    cancelled = False
+
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                logger.error("Connection health watchdog error: %s", exc)
+                await asyncio.sleep(10.0)
 
     # ------------------------------------------------------------------
     # Event dispatch

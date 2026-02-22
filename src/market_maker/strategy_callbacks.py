@@ -1,14 +1,44 @@
 from __future__ import annotations
 
+import logging
 import time
+from collections import deque
 from decimal import Decimal
 from typing import Optional
 
 from .account_stream import FillEvent
 
+logger = logging.getLogger(__name__)
+
+# Maximum number of trade IDs to retain for deduplication.
+_SEEN_TRADE_IDS_MAX = 10_000
+
 
 def on_fill(strategy, fill: FillEvent) -> None:
-    """Record fill telemetry and reset adaptive POF state for matched levels."""
+    """Record fill telemetry and reset adaptive POF state for matched levels.
+
+    Skips duplicate fills identified by ``trade_id`` to prevent double-counting
+    when the account stream delivers the same trade event more than once.
+    """
+    # --- Deduplication ---
+    seen: deque = strategy._seen_trade_ids
+    if fill.trade_id in strategy._seen_trade_ids_set:
+        logger.warning(
+            "Duplicate fill ignored: trade_id=%s side=%s qty=%s",
+            fill.trade_id,
+            fill.side,
+            fill.qty,
+        )
+        return
+
+    seen.append(fill.trade_id)
+    strategy._seen_trade_ids_set.add(fill.trade_id)
+    # Cap set size by evicting oldest entries
+    while len(seen) > _SEEN_TRADE_IDS_MAX:
+        evicted = seen.popleft()
+        strategy._seen_trade_ids_set.discard(evicted)
+
+    # --- Normal fill processing ---
     bid = strategy._ob.best_bid()
     ask = strategy._ob.best_ask()
     market_snapshot = strategy._ob.market_snapshot(
@@ -23,6 +53,15 @@ def on_fill(strategy, fill: FillEvent) -> None:
     if order_info is not None:
         key = (str(order_info.side), order_info.level)
         strategy._reset_pof_state(key)
+
+        # Record fill in fill quality tracker (markout scheduling).
+        fill_quality = getattr(strategy, "_fill_quality", None)
+        if fill_quality is not None:
+            fill_quality.record_fill(
+                key=key,
+                fill_price=fill.price,
+                side_name=str(order_info.side),
+            )
 
     strategy._journal.record_fill(
         trade_id=fill.trade_id,

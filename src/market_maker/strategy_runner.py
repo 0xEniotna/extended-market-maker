@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import signal
 import sys
+import time
 import uuid
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
+from pathlib import Path
 from typing import Any, Type
 
 from x10.perpetual.accounts import StarkPerpetualAccount
@@ -22,6 +26,19 @@ from .risk_manager import RiskManager
 from .trade_journal import TradeJournal
 
 logger = logging.getLogger(__name__)
+
+# Module-level flag for double-signal detection.
+_shutdown_in_progress = False
+_force_exit_event: asyncio.Event | None = None
+
+
+class _DecimalEncoder(json.JSONEncoder):
+    """Encode Decimal as string to preserve precision in JSON."""
+
+    def default(self, o):
+        if isinstance(o, Decimal):
+            return str(o)
+        return super().default(o)
 
 
 @dataclass
@@ -144,22 +161,37 @@ def _build_runtime_context(
     order_size: Decimal,
 ) -> RuntimeContext:
     ob_mgr = OrderbookManager(settings.endpoint_config, settings.market_name)
-    order_mgr = OrderManager(trading_client, settings.market_name)
+    order_mgr = OrderManager(
+        trading_client,
+        settings.market_name,
+        max_orders_per_second=settings.max_orders_per_second,
+        maintenance_pause_s=settings.maintenance_pause_s,
+    )
     risk_mgr = RiskManager(
         trading_client,
         settings.market_name,
         settings.max_position_size,
         max_order_notional_usd=settings.max_order_notional_usd,
         max_position_notional_usd=settings.max_position_notional_usd,
+        gross_exposure_limit_usd=settings.gross_exposure_limit_usd,
+        max_long_position_size=settings.max_long_position_size,
+        max_short_position_size=settings.max_short_position_size,
         balance_aware_sizing_enabled=settings.balance_aware_sizing_enabled,
         balance_usage_factor=settings.balance_usage_factor,
         balance_notional_multiplier=settings.balance_notional_multiplier,
         balance_min_available_usd=settings.balance_min_available_usd,
+        balance_staleness_max_s=settings.balance_staleness_max_s,
+        orderbook_mgr=ob_mgr,
     )
     account_stream = AccountStreamManager(
         settings.endpoint_config, settings.api_key, settings.market_name
     )
-    journal = TradeJournal(settings.market_name, run_id=uuid.uuid4().hex, schema_version=2)
+    journal = TradeJournal(
+        settings.market_name,
+        run_id=uuid.uuid4().hex,
+        schema_version=2,
+        max_size_mb=settings.journal_max_size_mb,
+    )
     metrics = MetricsCollector(
         orderbook_mgr=ob_mgr,
         order_mgr=order_mgr,
@@ -223,18 +255,26 @@ def _register_callbacks(ctx: RuntimeContext) -> None:
     ctx.account_stream.on_balance_update(ctx.risk_mgr.handle_balance_update)
     ctx.order_mgr.on_level_freed(ctx.strategy._on_level_freed)
     ctx.account_stream.on_fill(ctx.strategy._on_fill)
+    # Wire cross-references for health monitoring and event logging.
+    ctx.account_stream.set_order_manager(ctx.order_mgr)
+    ctx.account_stream.set_journal(ctx.journal)
+    ctx.order_mgr.set_journal(ctx.journal)
 
 
 async def _start_services(ctx: RuntimeContext) -> None:
     await ctx.ob_mgr.start()
     await ctx.account_stream.start()
     await ctx.metrics.start()
+    ctx.order_mgr.start_rate_limiter()
 
 
 async def _stop_services(ctx: RuntimeContext) -> None:
     await ctx.metrics.stop()
+    await ctx.order_mgr.stop_rate_limiter()
     await ctx.account_stream.stop()
     await ctx.ob_mgr.stop()
+    # Wait for in-flight order operations to complete before closing.
+    await ctx.order_mgr.wait_for_inflight(timeout_s=5.0)
     await ctx.trading_client.close()
 
 
@@ -304,9 +344,25 @@ async def _refresh_risk_state(ctx: RuntimeContext) -> None:
 
 
 def _install_signal_handlers(strategy: Any) -> None:
+    global _shutdown_in_progress, _force_exit_event
     loop = asyncio.get_running_loop()
+    _force_exit_event = asyncio.Event()
+
+    def _double_signal_handler() -> None:
+        global _shutdown_in_progress
+        if _shutdown_in_progress:
+            # Second signal: force-exit immediately
+            logger.critical(
+                "Second signal received during shutdown — skipping flatten, force-exiting"
+            )
+            if _force_exit_event is not None:
+                _force_exit_event.set()
+            return
+        # First signal: normal shutdown
+        strategy._handle_signal()
+
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, strategy._handle_signal)
+        loop.add_signal_handler(sig, _double_signal_handler)
     loop.add_signal_handler(signal.SIGHUP, strategy._handle_reload)
 
 
@@ -324,8 +380,27 @@ def _create_tasks(ctx: RuntimeContext) -> list[asyncio.Task]:
     tasks.append(asyncio.create_task(ctx.strategy._circuit_breaker_task(), name="mm-circuit-breaker"))
     tasks.append(asyncio.create_task(ctx.strategy._funding_refresh_task(), name="mm-funding-refresh"))
     tasks.append(asyncio.create_task(ctx.strategy._drawdown_watchdog_task(), name="mm-drawdown-watchdog"))
+    tasks.append(asyncio.create_task(_heartbeat_task(ctx), name="mm-heartbeat"))
     logger.info("Market maker running with %d tasks", len(tasks))
     return tasks
+
+
+async def _heartbeat_task(ctx: RuntimeContext) -> None:
+    """Emit a heartbeat journal event every 30 seconds."""
+    start_ts = time.monotonic()
+    while True:
+        try:
+            await asyncio.sleep(30.0)
+            ctx.journal.record_heartbeat(
+                position=ctx.risk_mgr.get_current_position(),
+                event_count=ctx.journal.event_count,
+                active_orders=ctx.order_mgr.active_order_count(),
+                uptime_s=time.monotonic() - start_ts,
+            )
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            logger.error("Heartbeat error: %s", exc)
 
 
 async def _cancel_tasks(tasks: list[asyncio.Task]) -> None:
@@ -333,6 +408,147 @@ async def _cancel_tasks(tasks: list[asyncio.Task]) -> None:
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
 
+
+# ------------------------------------------------------------------
+# State persistence helpers
+# ------------------------------------------------------------------
+
+def _write_json_state(directory: str, market_name: str, data: dict) -> Path | None:
+    """Write a JSON state file to a directory, creating it if needed.
+
+    Returns the written path, or None if writing fails.
+    """
+    try:
+        dir_path = Path(directory)
+        dir_path.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y%m%dT%H%M%S")
+        safe_market = market_name.replace("/", "-")
+        file_path = dir_path / f"{safe_market}_{ts}.json"
+        with open(file_path, "w") as f:
+            json.dump(data, f, cls=_DecimalEncoder, indent=2)
+        return file_path
+    except Exception as exc:
+        logger.error("Failed to write state file to %s: %s", directory, exc)
+        return None
+
+
+def _collect_orderbook_state(ctx: RuntimeContext) -> dict:
+    """Collect current orderbook state for persistence."""
+    bid = ctx.ob_mgr.best_bid()
+    ask = ctx.ob_mgr.best_ask()
+    return {
+        "best_bid": str(bid.price) if bid else None,
+        "best_bid_size": str(bid.size) if bid else None,
+        "best_ask": str(ask.price) if ask else None,
+        "best_ask_size": str(ask.size) if ask else None,
+        "is_stale": ctx.ob_mgr.is_stale(),
+        "spread_bps": str(ctx.ob_mgr.spread_bps()) if bid and ask else None,
+    }
+
+
+def _collect_active_orders(ctx: RuntimeContext) -> list[dict]:
+    """Collect active order info for persistence."""
+    result = []
+    for ext_id, info in ctx.order_mgr.get_active_orders().items():
+        result.append({
+            "external_id": ext_id,
+            "side": str(info.side),
+            "price": str(info.price),
+            "size": str(info.size),
+            "level": info.level,
+            "exchange_order_id": info.exchange_order_id,
+        })
+    return result
+
+
+def _write_pre_shutdown_state(ctx: RuntimeContext, shutdown_reason: str) -> None:
+    """Write a snapshot before starting the shutdown sequence."""
+    data = {
+        "type": "pre_shutdown_state",
+        "timestamp": time.time(),
+        "market": ctx.settings.market_name,
+        "shutdown_reason": shutdown_reason,
+        "position": ctx.risk_mgr.get_current_position(),
+        "position_pnl": {
+            "realized": ctx.risk_mgr.get_position_realized_pnl(),
+            "unrealized": ctx.risk_mgr.get_position_unrealized_pnl(),
+            "total": ctx.risk_mgr.get_position_total_pnl(),
+        },
+        "available_for_trade": ctx.risk_mgr.get_available_for_trade(),
+        "active_orders": _collect_active_orders(ctx),
+        "orderbook": _collect_orderbook_state(ctx),
+        "config": {
+            "max_position_size": ctx.settings.max_position_size,
+            "max_position_notional_usd": ctx.settings.max_position_notional_usd,
+            "flatten_position_on_shutdown": ctx.settings.flatten_position_on_shutdown,
+            "shutdown_flatten_retries": ctx.settings.shutdown_flatten_retries,
+            "shutdown_flatten_slippage_bps": ctx.settings.shutdown_flatten_slippage_bps,
+            "shutdown_flatten_slippage_step_bps": ctx.settings.shutdown_flatten_slippage_step_bps,
+            "shutdown_flatten_max_slippage_bps": ctx.settings.shutdown_flatten_max_slippage_bps,
+            "shutdown_timeout_s": ctx.settings.shutdown_timeout_s,
+        },
+    }
+    path = _write_json_state("data/mm_shutdown_state", ctx.settings.market_name, data)
+    if path:
+        logger.info("Pre-shutdown state written to %s", path)
+
+
+def _write_emergency_state(
+    ctx: RuntimeContext,
+    reason: str,
+) -> None:
+    """Write emergency state file when shutdown timeout is exceeded."""
+    data = {
+        "type": "emergency_state",
+        "timestamp": time.time(),
+        "market": ctx.settings.market_name,
+        "reason": reason,
+        "position": ctx.risk_mgr.get_current_position(),
+        "active_orders": _collect_active_orders(ctx),
+        "orderbook": _collect_orderbook_state(ctx),
+    }
+    path = _write_json_state("data/mm_emergency", ctx.settings.market_name, data)
+    if path:
+        logger.critical("Emergency state written to %s", path)
+
+
+def _get_last_known_mid(ctx: RuntimeContext) -> Decimal | None:
+    """Get the last known mid price from orderbook, even if stale."""
+    bid = ctx.ob_mgr.best_bid()
+    ask = ctx.ob_mgr.best_ask()
+    if bid is not None and ask is not None and bid.price > 0 and ask.price > 0:
+        return (bid.price + ask.price) / 2
+    # Try individual sides
+    if bid is not None and bid.price > 0:
+        return bid.price
+    if ask is not None and ask.price > 0:
+        return ask.price
+    return None
+
+
+# ------------------------------------------------------------------
+# Progressive slippage
+# ------------------------------------------------------------------
+
+def _compute_progressive_slippage(
+    attempt: int,
+    base_bps: Decimal,
+    step_bps: Decimal,
+    max_bps: Decimal,
+) -> Decimal:
+    """Compute slippage for a given attempt (1-indexed).
+
+    attempt 1 → base_bps
+    attempt 2 → base_bps + step_bps
+    attempt N → min(base_bps + (N-1) * step_bps, max_bps)
+    """
+    slippage = base_bps + step_bps * Decimal(str(attempt - 1))
+    return min(slippage, max_bps)
+
+
+# ------------------------------------------------------------------
+# Shutdown flatten with progressive slippage & one-sided book
+# ------------------------------------------------------------------
 
 async def _attempt_shutdown_flatten(
     ctx: RuntimeContext,
@@ -354,13 +570,28 @@ async def _attempt_shutdown_flatten(
 
     flatten_reason = "already_flat"
     for attempt in range(1, ctx.settings.shutdown_flatten_retries + 1):
+        # Check for force-exit signal
+        if _force_exit_event is not None and _force_exit_event.is_set():
+            flatten_reason = "force_exit"
+            logger.warning("Flatten aborted by force-exit signal on attempt %d", attempt)
+            break
+
         current_position = ctx.risk_mgr.get_current_position()
         if current_position == 0:
             break
 
         bid_lvl = ctx.ob_mgr.best_bid()
         ask_lvl = ctx.ob_mgr.best_ask()
+        last_mid = _get_last_known_mid(ctx)
         flatten_attempts = attempt
+
+        slippage = _compute_progressive_slippage(
+            attempt=attempt,
+            base_bps=ctx.settings.shutdown_flatten_slippage_bps,
+            step_bps=ctx.settings.shutdown_flatten_slippage_step_bps,
+            max_bps=ctx.settings.shutdown_flatten_max_slippage_bps,
+        )
+
         flatten_result = await ctx.order_mgr.flatten_position(
             signed_position=current_position,
             best_bid=bid_lvl.price if bid_lvl else None,
@@ -368,7 +599,8 @@ async def _attempt_shutdown_flatten(
             tick_size=ctx.tick_size,
             min_order_size=ctx.min_order_size,
             size_step=ctx.min_order_size_change,
-            slippage_bps=ctx.settings.shutdown_flatten_slippage_bps,
+            slippage_bps=slippage,
+            last_known_mid=last_mid,
         )
         flatten_attempted = flatten_attempted or flatten_result.attempted
         flatten_submitted = flatten_submitted or flatten_result.success
@@ -380,25 +612,52 @@ async def _attempt_shutdown_flatten(
         if remaining_position == 0:
             flatten_reason = "flattened"
             logger.warning(
-                "Shutdown flatten completed on attempt %d/%d for market=%s",
+                "Shutdown flatten completed on attempt %d/%d for market=%s (slippage=%sbps)",
                 attempt,
                 ctx.settings.shutdown_flatten_retries,
                 ctx.settings.market_name,
+                slippage,
             )
             break
 
         logger.warning(
             "Shutdown flatten attempt %d/%d incomplete for market=%s: "
-            "before=%s remaining=%s reason=%s",
+            "before=%s remaining=%s reason=%s slippage=%sbps",
             attempt,
             ctx.settings.shutdown_flatten_retries,
             ctx.settings.market_name,
             current_position,
             remaining_position,
             flatten_result.reason,
+            slippage,
         )
         if flatten_result.reason in {"below_min_order_size", "missing_orderbook_price"}:
             break
+
+    # --- Feature 6: Fresh REST verification after flatten loop ---
+    try:
+        await ctx.risk_mgr.refresh_position()
+    except Exception as exc:
+        logger.error("Failed to refresh position after flatten loop: %s", exc)
+    final_position = ctx.risk_mgr.get_current_position()
+    if final_position != 0:
+        bid_lvl = ctx.ob_mgr.best_bid()
+        ask_lvl = ctx.ob_mgr.best_ask()
+        ref_price = Decimal("0")
+        if bid_lvl and ask_lvl:
+            ref_price = (bid_lvl.price + ask_lvl.price) / 2
+        elif bid_lvl:
+            ref_price = bid_lvl.price
+        elif ask_lvl:
+            ref_price = ask_lvl.price
+        remaining_notional = abs(final_position) * ref_price if ref_price > 0 else Decimal("0")
+        logger.critical(
+            "POSITION NOT FLAT after all flatten retries for market=%s: "
+            "remaining_position=%s remaining_notional_usd=%s",
+            ctx.settings.market_name,
+            final_position,
+            remaining_notional,
+        )
 
     return {
         "enabled": flatten_enabled,
@@ -409,15 +668,39 @@ async def _attempt_shutdown_flatten(
     }
 
 
-async def _shutdown_and_record(ctx: RuntimeContext, tasks: list[asyncio.Task]) -> None:
+# ------------------------------------------------------------------
+# Core shutdown sequence
+# ------------------------------------------------------------------
+
+async def _shutdown_core(ctx: RuntimeContext, tasks: list[asyncio.Task]) -> None:
+    """Core shutdown logic: cancel tasks/orders, flatten, record stats."""
+    global _shutdown_in_progress
+    _shutdown_in_progress = True
+
     logger.info("Shutting down — cancelling tasks, orders, and flattening position...")
+
+    # --- Feature 4: Pre-shutdown state persistence ---
+    shutdown_reason = ctx.strategy.shutdown_reason
+    _write_pre_shutdown_state(ctx, shutdown_reason)
+
     await _cancel_tasks(tasks)
     await ctx.order_mgr.cancel_all_orders()
 
     await ctx.risk_mgr.refresh_position()
     shutdown_position_before_flatten = ctx.risk_mgr.get_current_position()
-    shutdown_reason = ctx.strategy.shutdown_reason
-    flatten = await _attempt_shutdown_flatten(ctx, shutdown_reason)
+
+    # Check force-exit before flatten
+    if _force_exit_event is not None and _force_exit_event.is_set():
+        flatten = {
+            "enabled": False,
+            "attempted": False,
+            "submitted": False,
+            "reason": "force_exit",
+            "attempts": 0,
+        }
+        logger.warning("Skipping flatten due to force-exit signal")
+    else:
+        flatten = await _attempt_shutdown_flatten(ctx, shutdown_reason)
 
     await ctx.risk_mgr.refresh_position()
     shutdown_position_after_flatten = ctx.risk_mgr.get_current_position()
@@ -449,8 +732,36 @@ async def _shutdown_and_record(ctx: RuntimeContext, tasks: list[asyncio.Task]) -
     logger.info("Market maker stopped")
 
 
+async def _shutdown_and_record(ctx: RuntimeContext, tasks: list[asyncio.Task]) -> None:
+    """Wrap shutdown in a hard timeout. On timeout, write emergency state and force exit."""
+    timeout_s = ctx.settings.shutdown_timeout_s
+    try:
+        await asyncio.wait_for(_shutdown_core(ctx, tasks), timeout=timeout_s)
+    except asyncio.TimeoutError:
+        logger.critical(
+            "SHUTDOWN TIMEOUT: shutdown sequence exceeded %ss for market=%s — force exiting",
+            timeout_s,
+            ctx.settings.market_name,
+        )
+        _write_emergency_state(ctx, reason="shutdown_timeout")
+        # Best-effort cleanup
+        try:
+            ctx.journal.close()
+        except Exception:
+            pass
+        try:
+            await _stop_services(ctx)
+        except Exception:
+            pass
+        os._exit(1)
+
+
 async def run_strategy(strategy_cls: Type) -> None:
     """Load config, initialise components, and run the strategy."""
+    global _shutdown_in_progress, _force_exit_event
+    _shutdown_in_progress = False
+    _force_exit_event = None
+
     settings = MarketMakerSettings()
     _configure_logging(settings)
     _log_startup(settings)

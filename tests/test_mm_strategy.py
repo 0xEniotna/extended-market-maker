@@ -211,6 +211,8 @@ def _make_strategy(
     orders.reserved_exposure.return_value = (Decimal("0"), Decimal("0"))
     orders.active_order_count.return_value = 0
     orders.consecutive_failures = 0
+    orders.avg_placement_latency_ms.return_value = 0.0
+    orders.latency_sample_count.return_value = 0
 
     strategy = MarketMakerStrategy(
         settings=settings,

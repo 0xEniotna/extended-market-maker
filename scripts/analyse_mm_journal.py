@@ -86,6 +86,72 @@ def _first_position(events: List[Dict[str, Any]]) -> Optional[Decimal]:
     return None
 
 
+# Expected schema version for analysis.
+_EXPECTED_SCHEMA_VERSION = 2
+
+
+def validate_schema_versions(
+    events: List[Dict[str, Any]],
+) -> Tuple[bool, List[str]]:
+    """Check that all events have the expected schema version.
+
+    Returns (all_valid, warnings).  If there are incompatible events, the
+    caller should print a warning and skip analysis sections that would
+    produce wrong numbers for those events.
+    """
+    warnings: List[str] = []
+    version_counts: Dict[int, int] = Counter()
+    for e in events:
+        v = e.get("schema_version")
+        if v is not None:
+            version_counts[int(v)] += 1
+        else:
+            version_counts[-1] += 1  # missing version
+
+    all_valid = True
+    for version, count in sorted(version_counts.items()):
+        if version == -1:
+            warnings.append(
+                f"  {count} events have no schema_version (pre-v1 format)"
+            )
+            all_valid = False
+        elif version != _EXPECTED_SCHEMA_VERSION:
+            warnings.append(
+                f"  {count} events have schema_version={version} "
+                f"(expected {_EXPECTED_SCHEMA_VERSION})"
+            )
+            all_valid = False
+    return all_valid, warnings
+
+
+def detect_heartbeat_gaps(
+    events: List[Dict[str, Any]],
+    max_gap_s: float = 60.0,
+) -> List[Dict[str, Any]]:
+    """Detect gaps > max_gap_s between consecutive heartbeat events.
+
+    Returns a list of gap records with start_ts, end_ts, gap_s.
+    """
+    heartbeats = [e for e in events if e.get("type") == "heartbeat"]
+    if len(heartbeats) < 2:
+        return []
+
+    gaps: List[Dict[str, Any]] = []
+    for i in range(1, len(heartbeats)):
+        prev_ts = float(heartbeats[i - 1].get("ts", 0))
+        curr_ts = float(heartbeats[i].get("ts", 0))
+        delta = curr_ts - prev_ts
+        if delta > max_gap_s:
+            gaps.append({
+                "start_ts": prev_ts,
+                "end_ts": curr_ts,
+                "gap_s": delta,
+                "start_iso": _ts_fmt(prev_ts),
+                "end_iso": _ts_fmt(curr_ts),
+            })
+    return gaps
+
+
 def load_journal(path: Path) -> List[Dict[str, Any]]:
     events = []
     with open(path) as f:
@@ -371,6 +437,26 @@ def analyse(events: List[Dict[str, Any]], path: Path, assumed_fee_bps: Optional[
     lines.append(f"Events: {len(events)} total "
                  f"({len(fills)} fills, {len(orders)} placements, {len(snapshots)} snapshots)")
     lines.append("")
+
+    # ── Schema version validation ──
+    schema_valid, schema_warnings = validate_schema_versions(events)
+    if not schema_valid:
+        lines.append("## Schema Warnings")
+        for w in schema_warnings:
+            lines.append(w)
+        lines.append("  Some analysis sections may be inaccurate for incompatible events.")
+        lines.append("")
+
+    # ── Heartbeat gap detection ──
+    hb_gaps = detect_heartbeat_gaps(events)
+    if hb_gaps:
+        lines.append("## Heartbeat Gaps (potential outages)")
+        for gap in hb_gaps:
+            lines.append(
+                f"  {gap['start_iso']} → {gap['end_iso']}  "
+                f"({gap['gap_s']:.0f}s gap)"
+            )
+        lines.append("")
 
     # ── Fill analysis ──
     if fills:
@@ -864,6 +950,15 @@ def main() -> None:
 
     print(f"Analysing: {target}\n")
     events = load_journal(target)
+
+    # Top-level schema check before analysis
+    schema_valid, schema_warnings = validate_schema_versions(events)
+    if not schema_valid:
+        print("⚠ Schema version warnings:")
+        for w in schema_warnings:
+            print(w)
+        print()
+
     report = analyse(events, target, args.assumed_fee_bps)
     print(report)
 

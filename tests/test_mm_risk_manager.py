@@ -42,6 +42,7 @@ def _make_rm(
     balance_usage_factor: Decimal = Decimal("0.95"),
     balance_notional_multiplier: Decimal = Decimal("1.0"),
     balance_min_available_usd: Decimal = Decimal("0"),
+    balance_staleness_max_s: float = 0,
 ) -> RiskManager:
     return RiskManager(
         trading_client=MagicMock(),
@@ -53,6 +54,7 @@ def _make_rm(
         balance_usage_factor=balance_usage_factor,
         balance_notional_multiplier=balance_notional_multiplier,
         balance_min_available_usd=balance_min_available_usd,
+        balance_staleness_max_s=balance_staleness_max_s,
     )
 
 

@@ -23,8 +23,9 @@ import logging
 import os
 import subprocess
 import time
+from collections import deque
 from decimal import ROUND_DOWN, Decimal
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
 from x10.perpetual.orders import OrderSide
 from x10.perpetual.trading_client import PerpetualTradingClient
@@ -33,6 +34,7 @@ from .account_stream import AccountStreamManager, FillEvent
 from .config import ENV_FILE, MarketMakerSettings
 from .decision_models import RegimeState, RepriceMarketContext, TrendState
 from .drawdown_stop import DrawdownStop
+from .fill_quality import FillQualityTracker
 from .guard_policy import GuardPolicy
 from .metrics import MetricsCollector
 from .order_manager import OrderManager
@@ -104,6 +106,10 @@ class MarketMakerStrategy:
         # Cancel reason tracking for journaling once cancellation is confirmed
         self._pending_cancel_reasons: Dict[str, str] = {}
 
+        # Fill deduplication: ordered deque + fast lookup set, capped at 10k entries.
+        self._seen_trade_ids: deque = deque()
+        self._seen_trade_ids_set: Set[int] = set()
+
         self._rebuild_components()
 
         self._funding_rate = Decimal("0")
@@ -133,19 +139,49 @@ class MarketMakerStrategy:
     def _handle_reload(self) -> None:
         """SIGHUP handler — reload config from environment / .env file."""
         try:
+            old_config = self._sanitized_run_config(self._settings)
             new_settings = MarketMakerSettings()
+            new_config = self._sanitized_run_config(new_settings)
+
+            # Compute diff: keys where values changed.
+            diff: Dict[str, Any] = {}
+            all_keys = set(old_config) | set(new_config)
+            for key in all_keys:
+                old_val = old_config.get(key)
+                new_val = new_config.get(key)
+                if str(old_val) != str(new_val):
+                    diff[key] = {"before": old_val, "after": new_val}
+
             self._settings = new_settings
             self._rebuild_components()
+
+            # Journal the config change event.
+            if hasattr(self, "_journal") and self._journal is not None:
+                self._journal.record_config_change(
+                    before=old_config,
+                    after=new_config,
+                    diff=diff,
+                )
+
             logger.info(
-                "Config reloaded: offset_mode=%s skew=%.2f spread_min=%s levels=%d max_age=%ss",
+                "Config reloaded: offset_mode=%s skew=%.2f spread_min=%s levels=%d max_age=%ss diff_keys=%s",
                 new_settings.offset_mode.value,
                 new_settings.inventory_skew_factor,
                 new_settings.min_spread_bps,
                 new_settings.num_price_levels,
                 new_settings.max_order_age_s,
+                list(diff.keys()) if diff else "none",
             )
         except Exception as exc:
             logger.error("Config reload failed: %s", exc)
+            if hasattr(self, "_journal") and self._journal is not None:
+                self._journal.record_error(
+                    component="config_reload",
+                    exception_type=type(exc).__name__,
+                    message=str(exc),
+                    stack_trace_hash=TradeJournal.make_stack_trace_hash(exc),
+                    stack_trace=TradeJournal.format_stack_trace(exc),
+                )
 
     @property
     def shutdown_reason(self) -> str:
@@ -154,7 +190,7 @@ class MarketMakerStrategy:
     @staticmethod
     def _sanitized_run_config(settings: MarketMakerSettings) -> Dict[str, Any]:
         """Return a config snapshot safe to persist in journals."""
-        data = settings.model_dump(mode="python")
+        data: Dict[str, Any] = settings.model_dump(mode="python")
         redact_keys = {
             "vault_id",
             "stark_private_key",
@@ -259,6 +295,13 @@ class MarketMakerStrategy:
                 logger.error(
                     "Error in level task %s L%d: %s", side, level, exc,
                     exc_info=True,
+                )
+                self._journal.record_error(
+                    component=f"level_task_{side}_L{level}",
+                    exception_type=type(exc).__name__,
+                    message=str(exc),
+                    stack_trace_hash=TradeJournal.make_stack_trace_hash(exc),
+                    stack_trace=TradeJournal.format_stack_trace(exc),
                 )
                 await asyncio.sleep(1.0)
 
@@ -368,7 +411,54 @@ class MarketMakerStrategy:
         return size.quantize(self._min_order_size_step, rounding=ROUND_DOWN)
 
     def _effective_safety_ticks(self, key: tuple[str, int]) -> int:
-        return self._post_only.effective_ticks(key)
+        avg_latency_ms = self._orders.avg_placement_latency_ms()
+        tick_time_ms = self._estimate_tick_time_ms()
+        return self._post_only.effective_ticks(
+            key, avg_latency_ms=avg_latency_ms, tick_time_ms=tick_time_ms,
+        )
+
+    def _estimate_tick_time_ms(self) -> float:
+        """Estimate how many ms it takes for the market to move one tick.
+
+        Uses recent micro-volatility to derive price speed, then converts
+        tick_size into a time estimate.  Returns 0 if data is insufficient
+        (which disables the latency-tick buffer).
+        """
+        window_s = self._settings.micro_vol_window_s
+        if window_s <= 0:
+            return 0.0
+        vol_bps = self._ob.micro_volatility_bps(window_s)
+        if vol_bps is None or vol_bps <= 0:
+            return 0.0
+        bid = self._ob.best_bid()
+        ask = self._ob.best_ask()
+        if bid is None or ask is None:
+            return 0.0
+        bp = getattr(bid, "price", None)
+        ap = getattr(ask, "price", None)
+        if bp is None or ap is None or bp <= 0 or ap <= 0:
+            return 0.0
+        mid = (bp + ap) / 2
+        tick_bps = float(self._tick_size / mid * Decimal("10000"))
+        if tick_bps <= 0:
+            return 0.0
+        # vol_bps is measured over window_s seconds
+        vol_per_ms = float(vol_bps) / (window_s * 1000.0)
+        if vol_per_ms <= 0:
+            return 0.0
+        return tick_bps / vol_per_ms
+
+    def _on_adverse_markout_widen(self, key: tuple[str, int], reason: str) -> None:
+        """Callback from FillQualityTracker when a level has adverse markout."""
+        base_ticks = max(1, int(self._settings.post_only_safety_ticks))
+        max_ticks = max(base_ticks, int(self._settings.pof_max_safety_ticks))
+        current = self._post_only.dynamic_safety_ticks.get(key, base_ticks)
+        new_ticks = min(max_ticks, current + 1)
+        self._post_only.dynamic_safety_ticks[key] = new_ticks
+        logger.warning(
+            "Adverse markout widen for %s: safety_ticks %d -> %d (reason=%s)",
+            key, current, new_ticks, reason,
+        )
 
     def _apply_adaptive_pof_reject(self, key: tuple[str, int]) -> None:
         self._post_only.on_rejection(key)
@@ -530,6 +620,17 @@ class MarketMakerStrategy:
             use_high_watermark=self._settings.drawdown_use_high_watermark,
         )
 
+        # Fill quality tracker for markout analysis and auto-widening.
+        self._fill_quality = FillQualityTracker(self._ob)
+        self._fill_quality.set_min_acceptable_markout_bps(
+            self._settings.min_acceptable_markout_bps,
+        )
+        self._fill_quality.set_offset_widen_callback(self._on_adverse_markout_widen)
+
+        # Wire optional trackers into metrics.
+        self._metrics.set_fill_quality_tracker(self._fill_quality)
+        self._metrics.set_post_only_safety(self._post_only)
+
         # Keep legacy attribute names as aliases for one release cycle.
         self._level_pof_until = self._post_only.pof_until
         self._level_pof_streak = self._post_only.pof_streak
@@ -570,8 +671,14 @@ class MarketMakerStrategy:
                     return
             except asyncio.CancelledError:
                 return
-            except Exception:
+            except Exception as exc:
                 logger.error("Drawdown watchdog error", exc_info=True)
+                self._journal.record_error(
+                    component="drawdown_watchdog",
+                    exception_type=type(exc).__name__,
+                    message=str(exc),
+                    stack_trace_hash=TradeJournal.make_stack_trace_hash(exc),
+                )
             await asyncio.sleep(_DRAWDOWN_CHECK_INTERVAL_S)
 
     async def _funding_refresh_task(self) -> None:
@@ -709,6 +816,12 @@ class MarketMakerStrategy:
                 return
             except Exception as exc:
                 logger.error("Position refresh error: %s", exc)
+                self._journal.record_error(
+                    component="position_refresh",
+                    exception_type=type(exc).__name__,
+                    message=str(exc),
+                    stack_trace_hash=TradeJournal.make_stack_trace_hash(exc),
+                )
             await asyncio.sleep(_POSITION_REFRESH_INTERVAL_S)
 
     # ------------------------------------------------------------------
@@ -716,7 +829,7 @@ class MarketMakerStrategy:
     # ------------------------------------------------------------------
 
     async def _circuit_breaker_task(self) -> None:
-        """Monitor consecutive failures and pause quoting when threshold is hit."""
+        """Monitor consecutive failures, sweep pending cancels, and detect zombies."""
         max_failures = self._settings.circuit_breaker_max_failures
         cooldown = self._settings.circuit_breaker_cooldown_s
         failure_window_s = self._settings.failure_window_s
@@ -725,6 +838,31 @@ class MarketMakerStrategy:
 
         while not self._shutdown_event.is_set():
             try:
+                # --- Sweep pending-cancel orders that timed out ---
+                self._orders.sweep_pending_cancels()
+
+                # --- Zombie order detection ---
+                zombie_threshold_s = self._settings.max_order_age_s * 2
+                if zombie_threshold_s > 0:
+                    zombies = self._orders.find_zombie_orders(zombie_threshold_s)
+                    for zombie in zombies:
+                        logger.warning(
+                            "Zombie order detected (no stream update in %.0fs): "
+                            "ext_id=%s exchange_id=%s side=%s level=%d — cancelling",
+                            time.monotonic() - zombie.placed_at,
+                            zombie.external_id,
+                            zombie.exchange_order_id,
+                            zombie.side,
+                            zombie.level,
+                        )
+                        await self._orders.cancel_order(zombie.external_id)
+
+                # --- POF-spread correlation update ---
+                placement_stats_60s = self._orders.failure_window_stats(60.0)
+                total_placements_60s = int(placement_stats_60s["attempts"])
+                self._post_only.update_pof_offset_boost(total_placements_60s)
+
+                # --- Failure rate circuit breaker ---
                 window_stats = self._orders.failure_window_stats(failure_window_s)
                 attempts = int(window_stats["attempts"])
                 failure_rate = float(window_stats["failure_rate"])
@@ -759,4 +897,10 @@ class MarketMakerStrategy:
                 return
             except Exception as exc:
                 logger.error("Circuit breaker task error: %s", exc)
+                self._journal.record_error(
+                    component="circuit_breaker",
+                    exception_type=type(exc).__name__,
+                    message=str(exc),
+                    stack_trace_hash=TradeJournal.make_stack_trace_hash(exc),
+                )
                 await asyncio.sleep(1.0)
