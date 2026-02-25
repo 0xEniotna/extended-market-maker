@@ -209,21 +209,29 @@ def _lookup_mid(
     return best_mid if best_gap <= tolerance_s else None
 
 
-_MARKOUT_HORIZONS = [1, 5, 30]  # seconds
+_MARKOUT_HORIZONS = [0.25, 1.0, 5.0, 30.0, 120.0]  # seconds
+
+
+def _horizon_label(horizon_s: float) -> str:
+    if horizon_s == 0.25:
+        return "250ms"
+    if horizon_s >= 60:
+        return f"{int(horizon_s / 60)}m"
+    return f"{int(horizon_s)}s"
 
 
 def _compute_markouts(
     fills: List[Dict[str, Any]],
     timestamps: List[float],
     mids: List[Decimal],
-) -> Dict[int, List[Decimal]]:
+) -> Dict[float, List[Decimal]]:
     """Compute markouts at each horizon for every fill.
 
     Markout = price movement in bps from fill_price, signed so positive = favorable.
     For BUY:  markout = (mid_at_T+N - fill_price) / fill_price * 10000
     For SELL: markout = (fill_price - mid_at_T+N) / fill_price * 10000
     """
-    result: Dict[int, List[Decimal]] = {h: [] for h in _MARKOUT_HORIZONS}
+    result: Dict[float, List[Decimal]] = {h: [] for h in _MARKOUT_HORIZONS}
     _10000 = Decimal("10000")
 
     for f in fills:
@@ -367,7 +375,7 @@ def build_summary(
         else None
     )
 
-    markout_values: Dict[int, List[Decimal]] = {1: [], 5: [], 30: []}
+    markout_values: Dict[float, List[Decimal]] = {h: [] for h in _MARKOUT_HORIZONS}
     for fill in fills:
         for horizon in markout_values.keys():
             m = _markout_for_fill(fill, float(horizon), ts_values, mid_values)
@@ -377,6 +385,21 @@ def build_summary(
     fill_rate_pct = None
     if orders:
         fill_rate_pct = Decimal(len(fills)) / Decimal(len(orders)) * Decimal("100")
+    taker_count = sum(1 for f in fills if f.get("is_taker"))
+    taker_notional = sum(
+        _d(f.get("qty")) * _d(f.get("price"))
+        for f in fills
+        if f.get("is_taker")
+    )
+    total_notional = sum(_d(f.get("qty")) * _d(f.get("price")) for f in fills)
+    taker_notional_ratio = (
+        taker_notional / total_notional if total_notional > 0 else Decimal("0")
+    )
+    quote_lifetimes_ms = [
+        _d(f.get("quote_lifetime_ms"))
+        for f in fills
+        if f.get("quote_lifetime_ms") is not None
+    ]
 
     return {
         "market": market,
@@ -401,14 +424,19 @@ def build_summary(
             "adverse_fill_count": adverse_fill_count,
             "adverse_fill_ratio": adverse_fill_ratio,
             "final_position": _latest_position(events),
-            "markout_1s_bps": _avg(markout_values[1]),
-            "markout_5s_bps": _avg(markout_values[5]),
-            "markout_30s_bps": _avg(markout_values[30]),
+            "markout_250ms_bps": _avg(markout_values[0.25]),
+            "markout_1s_bps": _avg(markout_values[1.0]),
+            "markout_5s_bps": _avg(markout_values[5.0]),
+            "markout_30s_bps": _avg(markout_values[30.0]),
+            "markout_2m_bps": _avg(markout_values[120.0]),
             "markout_counts": {
-                "1s": len(markout_values[1]),
-                "5s": len(markout_values[5]),
-                "30s": len(markout_values[30]),
+                _horizon_label(h): len(markout_values[h])
+                for h in _MARKOUT_HORIZONS
             },
+            "taker_fill_count": taker_count,
+            "taker_fill_notional_ratio": taker_notional_ratio,
+            "quote_lifetime_ms_avg": _avg(quote_lifetimes_ms),
+            "quote_lifetime_ms_count": len(quote_lifetimes_ms),
         },
     }
 
@@ -474,6 +502,17 @@ def analyse(events: List[Dict[str, Any]], path: Path, assumed_fee_bps: Optional[
             assumed_fees = fill_notional * assumed_fee_bps / Decimal("10000")
         taker_count = sum(1 for f in fills if f.get("is_taker"))
         maker_count = len(fills) - taker_count
+        taker_notional = sum(
+            _d(f["qty"]) * _d(f["price"]) for f in fills if f.get("is_taker")
+        )
+        taker_notional_ratio = (
+            taker_notional / fill_notional if fill_notional > 0 else Decimal("0")
+        )
+        quote_lifetimes_ms = [
+            _d(f.get("quote_lifetime_ms"))
+            for f in fills
+            if f.get("quote_lifetime_ms") is not None
+        ]
 
         lines.append(f"  Total: {len(fills)} fills "
                      f"({len(buy_fills)} buys, {len(sell_fills)} sells)")
@@ -482,6 +521,10 @@ def analyse(events: List[Dict[str, Any]], path: Path, assumed_fee_bps: Optional[
         lines.append(f"  Sell volume: {total_sell_qty} contracts  "
                      f"(${total_sell_notional:.2f} notional)")
         lines.append(f"  Maker/Taker: {maker_count}/{taker_count}")
+        lines.append(f"  Taker notional ratio: {(taker_notional_ratio * Decimal('100')):.2f}%")
+        if quote_lifetimes_ms:
+            avg_lifetime = sum(quote_lifetimes_ms) / Decimal(len(quote_lifetimes_ms))
+            lines.append(f"  Quote lifetime-to-fill: avg={avg_lifetime:.1f}ms n={len(quote_lifetimes_ms)}")
         lines.append(f"  Reported fees:  ${reported_fees:.4f}")
         if assumed_fee_bps is not None:
             lines.append(
@@ -582,7 +625,7 @@ def analyse(events: List[Dict[str, Any]], path: Path, assumed_fee_bps: Optional[
         lines.append(f"  Final position: {final_pos}")
 
         # Post-fill markouts measure short-horizon selection quality.
-        horizons = [1.0, 5.0, 30.0]
+        horizons = list(_MARKOUT_HORIZONS)
         markouts: Dict[float, List[Decimal]] = {h: [] for h in horizons}
         markout_coverage: Dict[float, int] = {h: 0 for h in horizons}
         for fill in fills:
@@ -603,16 +646,52 @@ def analyse(events: List[Dict[str, Any]], path: Path, assumed_fee_bps: Optional[
         lines.append("  Markout (bps):")
         for h in horizons:
             vals = markouts[h]
+            label = _horizon_label(h)
             if vals:
                 avg = sum(vals) / Decimal(len(vals))
                 lines.append(
-                    f"    +{int(h)}s: avg={avg:.2f}  min={min(vals):.2f}  "
+                    f"    +{label}: avg={avg:.2f}  min={min(vals):.2f}  "
                     f"max={max(vals):.2f}  n={len(vals)}/{len(fills)}"
                 )
             else:
                 lines.append(
-                    f"    +{int(h)}s: unavailable  n={markout_coverage[h]}/{len(fills)}"
+                    f"    +{label}: unavailable  n={markout_coverage[h]}/{len(fills)}"
                 )
+
+        def _conditioned_markout(
+            *,
+            side_filter: Optional[str] = None,
+            taker_filter: Optional[bool] = None,
+            horizon_s: float = 5.0,
+        ) -> List[Decimal]:
+            vals: List[Decimal] = []
+            for fill in fills:
+                side = str(fill.get("side", "")).upper()
+                is_taker = bool(fill.get("is_taker"))
+                if side_filter is not None and side_filter not in side:
+                    continue
+                if taker_filter is not None and taker_filter != is_taker:
+                    continue
+                m = _markout_for_fill(fill, horizon_s, ts_values, mid_values)
+                if m is not None:
+                    vals.append(m)
+            return vals
+
+        lines.append("  Markout +5s conditioned:")
+        for label, vals in [
+            ("maker", _conditioned_markout(taker_filter=False, horizon_s=5.0)),
+            ("taker", _conditioned_markout(taker_filter=True, horizon_s=5.0)),
+            ("buy", _conditioned_markout(side_filter="BUY", horizon_s=5.0)),
+            ("sell", _conditioned_markout(side_filter="SELL", horizon_s=5.0)),
+            ("buy-maker", _conditioned_markout(side_filter="BUY", taker_filter=False, horizon_s=5.0)),
+            ("buy-taker", _conditioned_markout(side_filter="BUY", taker_filter=True, horizon_s=5.0)),
+            ("sell-maker", _conditioned_markout(side_filter="SELL", taker_filter=False, horizon_s=5.0)),
+            ("sell-taker", _conditioned_markout(side_filter="SELL", taker_filter=True, horizon_s=5.0)),
+        ]:
+            if vals:
+                lines.append(f"    {label}: avg={(sum(vals) / Decimal(len(vals))):.2f}bps n={len(vals)}")
+            else:
+                lines.append(f"    {label}: n=0")
         lines.append("  Level toxicity (+5s markout):")
         for lvl_key in sorted(by_level):
             lvl_fills = by_level[lvl_key]
@@ -706,20 +785,16 @@ def analyse(events: List[Dict[str, Any]], path: Path, assumed_fee_bps: Optional[
                     for f in subset
                     if f.get("edge_bps") is not None
                 ]
-                mo = {
-                    1: [],
-                    5: [],
-                    30: [],
-                }
+                mo = {h: [] for h in _MARKOUT_HORIZONS}
                 for f in subset:
-                    for h in (1, 5, 30):
+                    for h in _MARKOUT_HORIZONS:
                         m = _markout_for_fill(f, float(h), ts_values, mid_values)
                         if m is not None:
                             mo[h].append(m)
-                adverse_5 = sum(1 for v in mo[5] if v < 0)
+                adverse_5 = sum(1 for v in mo[5.0] if v < 0)
                 adverse_5_pct = (
-                    Decimal(adverse_5) / Decimal(len(mo[5])) * Decimal("100")
-                    if mo[5] else Decimal("0")
+                    Decimal(adverse_5) / Decimal(len(mo[5.0])) * Decimal("100")
+                    if mo[5.0] else Decimal("0")
                 )
                 cashflow_bucket = Decimal("0")
                 for f in subset:
@@ -734,9 +809,11 @@ def analyse(events: List[Dict[str, Any]], path: Path, assumed_fee_bps: Optional[
                 lines.append(
                     f"    {bucket}: n={len(subset)} "
                     f"avg_edge={_format_avg(edges)}bps "
-                    f"mo1={_format_avg(mo[1])}bps "
-                    f"mo5={_format_avg(mo[5])}bps "
-                    f"mo30={_format_avg(mo[30])}bps "
+                    f"mo250ms={_format_avg(mo[0.25])}bps "
+                    f"mo1s={_format_avg(mo[1.0])}bps "
+                    f"mo5s={_format_avg(mo[5.0])}bps "
+                    f"mo30s={_format_avg(mo[30.0])}bps "
+                    f"mo2m={_format_avg(mo[120.0])}bps "
                     f"adverse5={adverse_5_pct:.1f}% "
                     f"cashflow=${cashflow_bucket:.2f}"
                 )

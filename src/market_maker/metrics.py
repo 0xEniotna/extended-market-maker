@@ -58,6 +58,20 @@ class StrategySnapshot:
     uptime_s: float = 0.0
     avg_placement_latency_ms: float = 0.0
     pof_offset_boost_bps: Decimal = Decimal("0")
+    taker_fill_count_1m: int = 0
+    taker_fill_notional_ratio_1m: Decimal = Decimal("0")
+    rate_limit_hits_window: int = 0
+    rate_limit_degraded: bool = False
+    rate_limit_halt: bool = False
+    quote_halted: bool = False
+    quote_halt_reasons: list[str] = field(default_factory=list)
+    margin_guard_breached: bool = False
+    avg_quote_lifetime_ms: Decimal = Decimal("0")
+    quote_lifetime_samples: int = 0
+    markout_segmented: Dict[str, Dict[str, Decimal | int]] = field(default_factory=dict)
+    deadman_armed: bool = False
+    deadman_countdown_s: Optional[int] = None
+    deadman_last_ok_ts: Optional[float] = None
     level_fill_quality: Dict[str, LevelFillQualitySnapshot] = field(
         default_factory=dict
     )
@@ -94,11 +108,35 @@ class MetricsCollector:
         # Optional post_only safety (for POF offset boost)
         self._post_only = None
 
+        # Strategy-fed states for monitoring.
+        self._quote_halt_reasons: set[str] = set()
+        self._margin_guard_breached: bool = False
+        self._deadman_armed: bool = False
+        self._deadman_countdown_s: Optional[int] = None
+        self._deadman_last_ok_ts: Optional[float] = None
+
     def set_fill_quality_tracker(self, tracker) -> None:
         self._fill_quality = tracker
 
     def set_post_only_safety(self, post_only) -> None:
         self._post_only = post_only
+
+    def set_quote_halt_state(self, reasons: set[str]) -> None:
+        self._quote_halt_reasons = set(reasons)
+
+    def set_margin_guard_breached(self, breached: bool) -> None:
+        self._margin_guard_breached = bool(breached)
+
+    def set_deadman_status(
+        self,
+        *,
+        armed: bool,
+        countdown_s: Optional[int],
+        last_ok_ts: Optional[float],
+    ) -> None:
+        self._deadman_armed = bool(armed)
+        self._deadman_countdown_s = countdown_s
+        self._deadman_last_ok_ts = last_ok_ts
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -126,6 +164,9 @@ class MetricsCollector:
         m = self._stream.metrics
 
         level_quality: Dict[str, LevelFillQualitySnapshot] = {}
+        markout_segmented: Dict[str, Dict[str, Decimal | int]] = {}
+        avg_quote_lifetime_ms = Decimal("0")
+        quote_lifetime_samples = 0
         if self._fill_quality is not None:
             for key, fq in self._fill_quality.all_level_qualities().items():
                 str_key = f"{key[0]}_L{key[1]}"
@@ -136,10 +177,48 @@ class MetricsCollector:
                     adverse_fill_pct=fq.adverse_fill_pct,
                     sample_count=fq.sample_count,
                 )
+            avg_quote_lifetime_ms = self._fill_quality.quote_lifetime_avg_ms()
+            quote_lifetime_samples = self._fill_quality.quote_lifetime_count()
+            for horizon in self._fill_quality.markout_horizons():
+                summary = self._fill_quality.segmented_markout_summary(horizon)
+                markout_segmented[horizon] = {
+                    "avg_all": summary.avg_all,
+                    "avg_maker": summary.avg_maker,
+                    "avg_taker": summary.avg_taker,
+                    "avg_buy": summary.avg_buy,
+                    "avg_sell": summary.avg_sell,
+                    "avg_buy_maker": summary.avg_buy_maker,
+                    "avg_buy_taker": summary.avg_buy_taker,
+                    "avg_sell_maker": summary.avg_sell_maker,
+                    "avg_sell_taker": summary.avg_sell_taker,
+                    "count_all": summary.count_all,
+                    "count_maker": summary.count_maker,
+                    "count_taker": summary.count_taker,
+                }
 
         pof_boost = Decimal("0")
         if self._post_only is not None:
             pof_boost = self._post_only.pof_offset_boost_bps
+
+        taker_fill_count_1m = 0
+        taker_fill_notional_ratio_1m = Decimal("0")
+        if hasattr(self._stream, "taker_fill_count_1m"):
+            taker_fill_count_1m = int(self._stream.taker_fill_count_1m())
+        if hasattr(self._stream, "taker_fill_notional_ratio_1m"):
+            taker_fill_notional_ratio_1m = Decimal(
+                str(self._stream.taker_fill_notional_ratio_1m())
+            )
+
+        rate_limit_hits_window = 0
+        if hasattr(self._orders, "rate_limit_hits_in_window"):
+            rate_limit_hits_window = int(self._orders.rate_limit_hits_in_window())
+
+        rate_limit_degraded_value = getattr(self._orders, "in_rate_limit_degraded", False)
+        if not isinstance(rate_limit_degraded_value, bool):
+            rate_limit_degraded_value = False
+        rate_limit_halt_value = getattr(self._orders, "in_rate_limit_halt", False)
+        if not isinstance(rate_limit_halt_value, bool):
+            rate_limit_halt_value = False
 
         return StrategySnapshot(
             timestamp=time.time(),
@@ -158,6 +237,20 @@ class MetricsCollector:
             uptime_s=time.monotonic() - self._start_ts,
             avg_placement_latency_ms=self._orders.avg_placement_latency_ms(),
             pof_offset_boost_bps=pof_boost,
+            taker_fill_count_1m=taker_fill_count_1m,
+            taker_fill_notional_ratio_1m=taker_fill_notional_ratio_1m,
+            rate_limit_hits_window=rate_limit_hits_window,
+            rate_limit_degraded=rate_limit_degraded_value,
+            rate_limit_halt=rate_limit_halt_value,
+            quote_halted=bool(self._quote_halt_reasons),
+            quote_halt_reasons=sorted(self._quote_halt_reasons),
+            margin_guard_breached=self._margin_guard_breached,
+            avg_quote_lifetime_ms=avg_quote_lifetime_ms,
+            quote_lifetime_samples=quote_lifetime_samples,
+            markout_segmented=markout_segmented,
+            deadman_armed=self._deadman_armed,
+            deadman_countdown_s=self._deadman_countdown_s,
+            deadman_last_ok_ts=self._deadman_last_ok_ts,
             level_fill_quality=level_quality,
         )
 
@@ -176,7 +269,9 @@ class MetricsCollector:
                 logger.info(
                     "STATUS | pos=%s | bid=%s ask=%s spread=%s | "
                     "orders=%d | fills=%d cancel=%d reject=%d pof=%d | "
-                    "fees=%s | fails=%d cb=%s | latency=%.0fms pof_boost=%sbps | uptime=%.0fs",
+                    "fees=%s | fails=%d cb=%s | latency=%.0fms pof_boost=%sbps | "
+                    "taker1m=%d ratio=%.2f%% | rl_hits=%d degraded=%s halt=%s | "
+                    "quote_halt=%s margin_breach=%s deadman=%s | uptime=%.0fs",
                     snap.position,
                     snap.best_bid or "N/A",
                     snap.best_ask or "N/A",
@@ -191,8 +286,22 @@ class MetricsCollector:
                     "OPEN" if snap.circuit_open else "closed",
                     snap.avg_placement_latency_ms,
                     snap.pof_offset_boost_bps,
+                    snap.taker_fill_count_1m,
+                    float(snap.taker_fill_notional_ratio_1m * Decimal("100")),
+                    snap.rate_limit_hits_window,
+                    snap.rate_limit_degraded,
+                    snap.rate_limit_halt,
+                    ",".join(snap.quote_halt_reasons) if snap.quote_halt_reasons else "none",
+                    snap.margin_guard_breached,
+                    "armed" if snap.deadman_armed else "off",
                     snap.uptime_s,
                 )
+                if snap.quote_lifetime_samples > 0:
+                    logger.info(
+                        "  FILL_LIFETIME avg=%.1fms samples=%d",
+                        snap.avg_quote_lifetime_ms,
+                        snap.quote_lifetime_samples,
+                    )
                 # Log per-level fill quality if available.
                 for level_key, fq in snap.level_fill_quality.items():
                     if fq.sample_count > 0:
@@ -206,6 +315,20 @@ class MetricsCollector:
                             fq.adverse_fill_pct,
                             fq.sample_count,
                         )
+                for horizon, summary in snap.markout_segmented.items():
+                    if int(summary.get("count_all", 0)) <= 0:
+                        continue
+                    logger.info(
+                        "  MARKOUT_%s all=%.2fbps maker=%.2fbps taker=%.2fbps "
+                        "buy=%.2fbps sell=%.2fbps n=%d",
+                        horizon,
+                        summary.get("avg_all", Decimal("0")),
+                        summary.get("avg_maker", Decimal("0")),
+                        summary.get("avg_taker", Decimal("0")),
+                        summary.get("avg_buy", Decimal("0")),
+                        summary.get("avg_sell", Decimal("0")),
+                        summary.get("count_all", 0),
+                    )
                 if self._journal is not None:
                     self._journal.record_snapshot(
                         position=snap.position,

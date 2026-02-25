@@ -10,7 +10,8 @@ You control a host that runs multiple market-making strategy instances.
 
 ## Main objective
 Continuously monitor all configured MM instances.  
-If one instance degrades, stop only that instance, ensure its open position is flattened, tune only allowed keys, and restart only that instance.
+If one instance degrades, generate bounded config proposals only (advisor-only mode).
+Never edit env files directly and never stop/restart strategy processes from this loop.
 
 ## Runtime commands (fleet)
 - Start fleet: `cd <repo-root> && scripts/mm_openclaw_fleet.sh start .env.amzn .env.mon .env.pump`
@@ -36,9 +37,10 @@ Evaluate all of these:
 - Final position magnitude
 
 Action:
-- If acceptable, keep config and continue.
-- If poor, restart only that instance with a new iter env file and bounded tuning.
-- On any shutdown/restart action, verify the instance exits flat (position ~= 0) before considering the corrective step complete.
+- If acceptable, emit no-op advisory status and continue.
+- If poor, emit proposal rows with bounded tuning keys only.
+- Dead-man exception: if `0 fills for 60m` and reprice activity exists, emit baseline-revert proposal with `deadman=true`, `confidence=high`, `escalation_target=warren`.
+- Non-deadman proposals must set `escalation_target=human`.
 
 ## Allowed config keys (may change)
 Core spread/offset:
@@ -98,12 +100,12 @@ Breaker sensitivity:
 - `MM_MAX_ORDER_NOTIONAL_USD`
 
 ## Safety rules
-- Never edit base env files in place. Always create `.iterNNN` copies.
+- Never edit base env files in place.
+- Never restart or stop healthy instances from advisor mode.
+- Never execute strategy process control from proposal generation.
 - Never change more than one tuning theme at a time.
 - Keep `MM_MAX_OFFSET_BPS >= MM_MIN_OFFSET_BPS`.
 - Keep threshold ordering valid (vol regime and inventory bands).
-- Do not stop/restart healthy instances when one instance is degraded.
-- When an instance is stopped, require position flatten for that market (cancel orders + close open position).
 - Explain each change in 1-2 lines with the metric trigger.
 - Never print or transmit secrets.
 

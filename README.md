@@ -63,9 +63,9 @@ PYTHONPATH=src python scripts/run_market_maker.py
 ## Main Scripts
 
 - `scripts/analyse_mm_journal.py`: summarize one run or the latest journal in a directory.
-- `scripts/mm_autotune_loop.py`: run-analyze-adjust loop using bounded MM\_\* key updates.
-- `scripts/mm_openclaw_controller.sh`: single-instance long-running autotune controller.
-- `scripts/mm_openclaw_fleet.sh`: run multiple autotune controllers (one per `.env.*` instance).
+- `scripts/mm_advisor_loop.py`: advisor-only config proposal loop (never mutates env, never restarts bots).
+- `scripts/mm_openclaw_controller.sh`: single-instance long-running advisor controller (per env).
+- `scripts/mm_openclaw_fleet.sh`: run multiple advisor controllers (one per `.env.*` instance).
 - `scripts/screen_mm_markets.py`: spread/tick/volume suitability screening.
 - `scripts/tools/find_mm_markets.py`: rolling market filter for MM candidates.
 - `scripts/tools/fetch_market_info.py`: inspect trading config and stats for one market.
@@ -89,8 +89,12 @@ scripts/mm_openclaw_fleet.sh status .env.asset
 scripts/mm_openclaw_fleet.sh logs .env.asset
 ```
 
-Each controller monitors only its own market journal and will stop/tune/restart only that instance when degradation is detected.  
-On shutdown/restart, the runtime now attempts to flatten that market's open position (reduce-only `MARKET+IOC`) after cancelling resting orders.
+Each controller monitors only its own market journal and emits advisory config proposals.  
+Controllers do not self-edit `.env` files and do not restart strategy instances.
+
+Apply authority:
+- Dead-man proposals (`deadman=true` + `guardrail_status=passed`) are escalated to Warren auto-apply.
+- All other proposals are routed for human review.
 
 ## Scout + Auditor Workflow
 
@@ -110,6 +114,9 @@ Primary artifacts:
 - `data/mm_audit/scout/action_pack.json`
 - `data/mm_audit/scout/market_scout_report.md`
 - `data/mm_audit/scout/market_scout_actions.sh`
+- `data/mm_audit/advisor/proposals.jsonl`
+- `data/mm_audit/advisor/apply_receipts.jsonl`
+- `data/mm_audit/autotune_baselines/<MARKET>.json`
 - `data/mm_audit/auditor/auditor_decisions.jsonl`
 - `data/mm_audit/auditor/pending_actions.json`
 - `data/mm_audit/auditor/auditor_followup_log.jsonl`

@@ -50,9 +50,14 @@ def on_fill(strategy, fill: FillEvent) -> None:
 
     order_info = strategy._orders.find_order_by_exchange_id(str(fill.order_id))
     level = order_info.level if order_info is not None else None
+    quote_lifetime_ms: Optional[Decimal] = None
     if order_info is not None:
         key = (str(order_info.side), order_info.level)
         strategy._reset_pof_state(key)
+        placed_at = getattr(order_info, "placed_at", None)
+        if placed_at is not None:
+            lifetime_ms_value = max(0.0, (time.monotonic() - placed_at) * 1000.0)
+            quote_lifetime_ms = Decimal(str(lifetime_ms_value))
 
         # Record fill in fill quality tracker (markout scheduling).
         fill_quality = getattr(strategy, "_fill_quality", None)
@@ -61,6 +66,18 @@ def on_fill(strategy, fill: FillEvent) -> None:
                 key=key,
                 fill_price=fill.price,
                 side_name=str(order_info.side),
+                is_taker=bool(fill.is_taker),
+                quote_lifetime_ms=quote_lifetime_ms,
+            )
+    else:
+        fill_quality = getattr(strategy, "_fill_quality", None)
+        if fill_quality is not None:
+            fill_quality.record_fill(
+                key=(strategy._normalise_side(str(fill.side)), -1),
+                fill_price=fill.price,
+                side_name=str(fill.side),
+                is_taker=bool(fill.is_taker),
+                quote_lifetime_ms=None,
             )
 
     strategy._journal.record_fill(
@@ -75,6 +92,7 @@ def on_fill(strategy, fill: FillEvent) -> None:
         best_bid=bid.price if bid else None,
         best_ask=ask.price if ask else None,
         position=strategy._risk.get_current_position(),
+        quote_lifetime_ms=quote_lifetime_ms,
         market_snapshot=market_snapshot,
     )
 

@@ -26,11 +26,12 @@ Inputs:
 Config passthrough:
   CONTROLLER_PREFIX=fleet
   ITERATIONS=999999
-  ANALYSIS_INTERVAL=60
-  MIN_FILLS=10
-  ASSUMED_FEE_BPS=0
-  MAX_RUN_SECONDS=0
-  ALLOW_MAINNET=1
+  ADVISOR_INTERVAL=1800
+  JOBS_JSON=/home/flexouille/.openclaw/cron/jobs.json
+  DEADMAN_WINDOW_S=3600
+  DEADMAN_COOLDOWN_S=1800
+  INVENTORY_WINDOW_S=7200
+  MAX_CHANGES_PER_HOUR=10
   PYTHON_BIN=.venv/bin/python
 EOF
 }
@@ -157,11 +158,12 @@ for env_label in "${envs[@]}"; do
     BASE_ENV="${env_path}" \
     CONTROLLER_ID="${controller_id}" \
     ITERATIONS="${ITERATIONS:-999999}" \
-    ANALYSIS_INTERVAL="${ANALYSIS_INTERVAL:-60}" \
-    MIN_FILLS="${MIN_FILLS:-10}" \
-    ASSUMED_FEE_BPS="${ASSUMED_FEE_BPS:-0}" \
-    MAX_RUN_SECONDS="${MAX_RUN_SECONDS:-0}" \
-    ALLOW_MAINNET="${ALLOW_MAINNET:-1}" \
+    ADVISOR_INTERVAL="${ADVISOR_INTERVAL:-1800}" \
+    JOBS_JSON="${JOBS_JSON:-/home/flexouille/.openclaw/cron/jobs.json}" \
+    DEADMAN_WINDOW_S="${DEADMAN_WINDOW_S:-3600}" \
+    DEADMAN_COOLDOWN_S="${DEADMAN_COOLDOWN_S:-1800}" \
+    INVENTORY_WINDOW_S="${INVENTORY_WINDOW_S:-7200}" \
+    MAX_CHANGES_PER_HOUR="${MAX_CHANGES_PER_HOUR:-10}" \
     PYTHON_BIN="${PYTHON_BIN:-}" \
       scripts/mm_openclaw_controller.sh "${action}"
   )

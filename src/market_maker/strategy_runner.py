@@ -19,6 +19,7 @@ from x10.perpetual.trading_client import PerpetualTradingClient
 
 from .account_stream import AccountStreamManager
 from .config import MarketMakerSettings, OffsetMode
+from .fee_resolver import FeeResolver
 from .metrics import MetricsCollector
 from .order_manager import OrderManager
 from .orderbook_manager import OrderbookManager
@@ -57,6 +58,7 @@ class RuntimeContext:
     journal: TradeJournal
     metrics: MetricsCollector
     strategy: Any
+    fee_resolver: FeeResolver | None = None
 
 
 def _configure_logging(settings: MarketMakerSettings) -> None:
@@ -160,6 +162,14 @@ def _build_runtime_context(
     min_order_size_change: Decimal,
     order_size: Decimal,
 ) -> RuntimeContext:
+    fee_resolver = FeeResolver(
+        trading_client=trading_client,
+        market_name=settings.market_name,
+        refresh_interval_s=settings.fee_refresh_interval_s,
+        builder_program_enabled=settings.builder_program_enabled,
+        builder_id=settings.builder_id if settings.builder_id > 0 else None,
+        configured_builder_fee_rate=settings.builder_fee_rate,
+    )
     ob_mgr = OrderbookManager(
         settings.endpoint_config,
         settings.market_name,
@@ -170,6 +180,13 @@ def _build_runtime_context(
         settings.market_name,
         max_orders_per_second=settings.max_orders_per_second,
         maintenance_pause_s=settings.maintenance_pause_s,
+        fee_resolver=fee_resolver,
+        rate_limit_degraded_s=settings.rate_limit_degraded_s,
+        rate_limit_halt_window_s=settings.rate_limit_halt_window_s,
+        rate_limit_halt_hits=settings.rate_limit_halt_hits,
+        rate_limit_halt_s=settings.rate_limit_halt_s,
+        rate_limit_extra_offset_bps=settings.rate_limit_extra_offset_bps,
+        rate_limit_reprice_multiplier=settings.rate_limit_reprice_multiplier,
     )
     risk_mgr = RiskManager(
         trading_client,
@@ -230,6 +247,7 @@ def _build_runtime_context(
         min_order_size=min_order_size,
         min_order_size_change=min_order_size_change,
         order_size=order_size,
+        fee_resolver=fee_resolver,
         ob_mgr=ob_mgr,
         order_mgr=order_mgr,
         risk_mgr=risk_mgr,
@@ -262,6 +280,8 @@ def _register_callbacks(ctx: RuntimeContext) -> None:
     # Wire cross-references for health monitoring and event logging.
     ctx.account_stream.set_order_manager(ctx.order_mgr)
     ctx.account_stream.set_journal(ctx.journal)
+    ctx.account_stream.set_fail_safe_handler(ctx.strategy._on_stream_desync)
+    ctx.ob_mgr.set_fail_safe_handler(ctx.strategy._on_stream_desync)
     ctx.order_mgr.set_journal(ctx.journal)
 
 
@@ -381,10 +401,14 @@ def _create_tasks(ctx: RuntimeContext) -> list[asyncio.Task]:
         )
     tasks.append(asyncio.create_task(ctx.strategy._position_refresh_task(), name="mm-pos-refresh"))
     tasks.append(asyncio.create_task(ctx.strategy._balance_refresh_task(), name="mm-balance-refresh"))
+    tasks.append(asyncio.create_task(ctx.strategy._margin_guard_task(), name="mm-margin-guard"))
     tasks.append(asyncio.create_task(ctx.strategy._circuit_breaker_task(), name="mm-circuit-breaker"))
     tasks.append(asyncio.create_task(ctx.strategy._funding_refresh_task(), name="mm-funding-refresh"))
     tasks.append(asyncio.create_task(ctx.strategy._drawdown_watchdog_task(), name="mm-drawdown-watchdog"))
+    tasks.append(asyncio.create_task(ctx.strategy._kpi_watchdog_task(), name="mm-kpi-watchdog"))
     tasks.append(asyncio.create_task(_heartbeat_task(ctx), name="mm-heartbeat"))
+    if ctx.settings.deadman_enabled:
+        tasks.append(asyncio.create_task(_deadman_heartbeat_task(ctx), name="mm-deadman"))
     logger.info("Market maker running with %d tasks", len(tasks))
     return tasks
 
@@ -405,6 +429,44 @@ async def _heartbeat_task(ctx: RuntimeContext) -> None:
             return
         except Exception as exc:
             logger.error("Heartbeat error: %s", exc)
+
+
+async def _deadman_heartbeat_task(ctx: RuntimeContext) -> None:
+    """Periodically arm the exchange dead-man switch."""
+    countdown_s = int(max(0, ctx.settings.deadman_countdown_s))
+    interval_s = max(1.0, float(ctx.settings.deadman_heartbeat_s))
+    while True:
+        try:
+            await ctx.trading_client.account.set_deadman_switch(countdown_s)
+            logger.info(
+                "Dead-man heartbeat armed: market=%s countdown=%ss interval=%.1fs",
+                ctx.settings.market_name,
+                countdown_s,
+                interval_s,
+            )
+            ctx.journal.record_exchange_event(
+                event_type="deadman_heartbeat",
+                details={
+                    "countdown_s": countdown_s,
+                    "interval_s": interval_s,
+                },
+            )
+            ctx.metrics.set_deadman_status(
+                armed=True,
+                countdown_s=countdown_s,
+                last_ok_ts=time.time(),
+            )
+            await asyncio.sleep(interval_s)
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            logger.error("Dead-man heartbeat error: %s", exc)
+            ctx.metrics.set_deadman_status(
+                armed=False,
+                countdown_s=countdown_s,
+                last_ok_ts=None,
+            )
+            await asyncio.sleep(min(interval_s, 5.0))
 
 
 async def _cancel_tasks(tasks: list[asyncio.Task]) -> None:
@@ -682,6 +744,7 @@ async def _shutdown_core(ctx: RuntimeContext, tasks: list[asyncio.Task]) -> None
     _shutdown_in_progress = True
 
     logger.info("Shutting down — cancelling tasks, orders, and flattening position...")
+    ctx.strategy._set_runtime_mode("shutdown")
 
     # --- Feature 4: Pre-shutdown state persistence ---
     shutdown_reason = ctx.strategy.shutdown_reason
@@ -704,7 +767,27 @@ async def _shutdown_core(ctx: RuntimeContext, tasks: list[asyncio.Task]) -> None
         }
         logger.warning("Skipping flatten due to force-exit signal")
     else:
+        ctx.strategy._set_runtime_mode("flatten")
         flatten = await _attempt_shutdown_flatten(ctx, shutdown_reason)
+        ctx.strategy._set_runtime_mode("shutdown")
+
+    deadman_enabled = bool(getattr(ctx.settings, "deadman_enabled", False))
+    if deadman_enabled:
+        try:
+            await ctx.trading_client.account.set_deadman_switch(0)
+            logger.info("Dead-man switch disarmed for market=%s", ctx.settings.market_name)
+            ctx.journal.record_exchange_event(
+                event_type="deadman_disarmed",
+                details={"countdown_s": 0},
+            )
+            if hasattr(ctx.metrics, "set_deadman_status"):
+                ctx.metrics.set_deadman_status(
+                    armed=False,
+                    countdown_s=0,
+                    last_ok_ts=time.time(),
+                )
+        except Exception as exc:
+            logger.error("Failed to disarm dead-man switch: %s", exc)
 
     await ctx.risk_mgr.refresh_position()
     shutdown_position_after_flatten = ctx.risk_mgr.get_current_position()
@@ -789,16 +872,28 @@ async def run_strategy(strategy_cls: Type) -> None:
         min_order_size_change=min_order_size_change,
         order_size=order_size,
     )
-    ctx = _build_runtime_context(
-        settings,
-        strategy_cls,
-        trading_client,
-        market_info,
-        tick_size=tick_size,
-        min_order_size=min_order_size,
-        min_order_size_change=min_order_size_change,
-        order_size=order_size,
-    )
+    try:
+        ctx = _build_runtime_context(
+            settings,
+            strategy_cls,
+            trading_client,
+            market_info,
+            tick_size=tick_size,
+            min_order_size=min_order_size,
+            min_order_size_change=min_order_size_change,
+            order_size=order_size,
+        )
+    except Exception as exc:
+        logger.error("Failed to initialize runtime context: %s", exc)
+        await trading_client.close()
+        return
+    try:
+        await ctx.fee_resolver.refresh(force=True)
+        await ctx.fee_resolver.validate_builder_config()
+    except Exception as exc:
+        logger.error("Fee resolver startup validation failed: %s", exc)
+        await trading_client.close()
+        return
     _record_run_start(ctx)
     _register_callbacks(ctx)
     await _start_services(ctx)

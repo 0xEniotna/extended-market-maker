@@ -125,6 +125,14 @@ class RepricePipeline:
         level_ctx: LevelContext,
         market_ctx: RepriceMarketContext,
     ) -> bool:
+        if strategy._level_cancel_pending_ext_id.get(level_ctx.key) is not None:
+            strategy._record_reprice_decision(
+                side=side,
+                level=level,
+                reason="skip_cancel_pending",
+            )
+            return False
+
         pof_until = strategy._level_pof_until.get(level_ctx.key, 0.0)
         if now < pof_until:
             strategy._record_reprice_decision(side=side, level=level, reason="skip_pof_cooldown")
@@ -276,12 +284,15 @@ class RepricePipeline:
         post_only = getattr(strategy, "_post_only", None)
         if post_only is not None:
             pof_boost = post_only.pof_offset_boost_bps
+        rate_limit_boost = getattr(strategy._orders, "rate_limit_extra_offset_bps", Decimal("0"))
+        if not isinstance(rate_limit_boost, Decimal):
+            rate_limit_boost = Decimal("0")
 
         return QuoteInputs(
             bid=bid,
             ask=ask,
             spread_bps=spread_bps,
-            extra_offset_bps=guard.extra_offset_bps + pof_boost,
+            extra_offset_bps=guard.extra_offset_bps + pof_boost + rate_limit_boost,
             current_best=current_best,
         )
 
@@ -427,6 +438,7 @@ class RepricePipeline:
         level_ctx: LevelContext,
         quote_inputs: QuoteInputs,
         order_plan: RiskAdjustedOrder,
+        market_ctx: RepriceMarketContext,
     ) -> None:
         if order_plan.level_size < strategy._market_min_order_size:
             if level_ctx.prev_ext_id is not None:
@@ -448,6 +460,18 @@ class RepricePipeline:
                 reason="reprice",
             )
             if not cancelled:
+                return
+            if strategy._orders.in_rate_limit_degraded:
+                strategy._record_reprice_decision(
+                    side=side,
+                    level=level,
+                    reason="cancel_only_rate_limit_degraded",
+                    **self._decision_fields(
+                        market_ctx=market_ctx,
+                        spread_bps=quote_inputs.spread_bps,
+                        extra_offset_bps=quote_inputs.extra_offset_bps,
+                    ),
+                )
                 return
 
         if strategy._ob.is_stale():
@@ -507,6 +531,10 @@ class RepricePipeline:
             regime = RegimeState(regime="NORMAL")
             trend = TrendState()
         min_interval, max_order_age_s = strategy._volatility.cadence(regime)
+        rate_limit_multiplier = getattr(strategy._orders, "rate_limit_reprice_multiplier", Decimal("1"))
+        if not isinstance(rate_limit_multiplier, Decimal):
+            rate_limit_multiplier = Decimal("1")
+        min_interval *= float(rate_limit_multiplier)
         return RepriceMarketContext(
             regime=regime,
             trend=trend,
@@ -601,4 +629,5 @@ class RepricePipeline:
             level_ctx=level_ctx,
             quote_inputs=quote_inputs,
             order_plan=order_plan,
+            market_ctx=market_ctx,
         )

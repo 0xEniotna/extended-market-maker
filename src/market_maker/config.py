@@ -12,7 +12,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # ---------------------------------------------------------------------------
@@ -75,6 +75,12 @@ class OffsetMode(str, Enum):
     DYNAMIC = "dynamic"
 
 
+class QuoteAnchor(str, Enum):
+    MID = "mid"
+    MARK = "mark"
+    INDEX = "index"
+
+
 # ---------------------------------------------------------------------------
 # Settings
 # ---------------------------------------------------------------------------
@@ -110,6 +116,19 @@ class MarketMakerSettings(BaseSettings):
         description=(
             "Behavior profile. 'legacy' keeps prior behavior, "
             "'crypto' enables regime/trend/funding/inventory-band logic."
+        ),
+    )
+    quote_anchor: QuoteAnchor = Field(
+        default=QuoteAnchor.MID,
+        description=(
+            "Reference price anchor used for quote construction "
+            "(mid, mark, or index)."
+        ),
+    )
+    markout_anchor: QuoteAnchor = Field(
+        default=QuoteAnchor.MID,
+        description=(
+            "Reference price anchor used for markout diagnostics."
         ),
     )
     num_price_levels: int = Field(
@@ -722,6 +741,117 @@ class MarketMakerSettings(BaseSettings):
         ),
     )
 
+    # --- Exchange fee / builder config ---
+    fee_refresh_interval_s: float = Field(
+        default=60.0,
+        gt=0,
+        description="Fee cache refresh interval in seconds.",
+    )
+    builder_program_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable explicit builder fee/id on order placement. "
+            "When false, builderFee is forced to 0 and builderId is omitted."
+        ),
+    )
+    builder_id: int = Field(
+        default=0,
+        ge=0,
+        description="Builder ID used when builder_program_enabled is true.",
+    )
+    builder_fee_rate: Decimal = Field(
+        default=Decimal("0"),
+        ge=0,
+        description="Configured builder fee rate cap when builder program is enabled.",
+    )
+
+    # --- Dead-man switch ---
+    deadman_enabled: bool = Field(
+        default=True,
+        description="Enable exchange dead-man switch heartbeat.",
+    )
+    deadman_countdown_s: int = Field(
+        default=60,
+        ge=0,
+        description="Dead-man switch countdown (seconds). 0 disables remote auto-cancel.",
+    )
+    deadman_heartbeat_s: float = Field(
+        default=20.0,
+        gt=0,
+        description="Dead-man switch heartbeat interval in seconds.",
+    )
+
+    # --- Margin guard ---
+    margin_guard_enabled: bool = Field(
+        default=True,
+        description="Enable proactive margin/liquidation-distance quote guard.",
+    )
+    min_available_balance_for_trading: Decimal = Field(
+        default=Decimal("100"),
+        ge=0,
+        description="Minimum required available_for_trade collateral before quoting.",
+    )
+    min_available_balance_ratio: Decimal = Field(
+        default=Decimal("0.15"),
+        ge=0,
+        le=1,
+        description="Minimum available_for_trade/equity ratio before quoting.",
+    )
+    max_margin_utilization: Decimal = Field(
+        default=Decimal("0.85"),
+        ge=0,
+        le=1,
+        description="Maximum initial_margin/equity utilization allowed while quoting.",
+    )
+    min_liq_distance_bps: Decimal = Field(
+        default=Decimal("500"),
+        ge=0,
+        description=(
+            "Minimum liquidation distance in bps from mark price. "
+            "If below this threshold, quoting is halted."
+        ),
+    )
+    margin_guard_shutdown_breach_s: float = Field(
+        default=15.0,
+        ge=0,
+        description=(
+            "Persisted breach duration before escalating from quote halt "
+            "to shutdown flatten."
+        ),
+    )
+
+    # --- Rate-limit hybrid mode ---
+    rate_limit_degraded_s: float = Field(
+        default=20.0,
+        ge=0,
+        description="Duration of degraded quoting mode after a 429 event.",
+    )
+    rate_limit_halt_window_s: float = Field(
+        default=60.0,
+        gt=0,
+        description="Window (seconds) for counting 429 bursts before halt.",
+    )
+    rate_limit_halt_hits: int = Field(
+        default=5,
+        ge=1,
+        description="Number of 429 hits within window required to trigger quote halt.",
+    )
+    rate_limit_halt_s: float = Field(
+        default=30.0,
+        gt=0,
+        description="Quote-halt duration after a 429 burst trip.",
+    )
+    rate_limit_extra_offset_bps: Decimal = Field(
+        default=Decimal("5"),
+        ge=0,
+        description="Additional quote widening (bps) during 429 degraded mode.",
+    )
+    rate_limit_reprice_multiplier: Decimal = Field(
+        default=Decimal("2"),
+        ge=1,
+        description="Reprice cadence multiplier during 429 degraded mode.",
+    )
+
     # --- Network resilience ---
     max_orders_per_second: float = Field(
         default=10.0,
@@ -806,3 +936,26 @@ class MarketMakerSettings(BaseSettings):
         if isinstance(v, str):
             return v.lower()
         return v
+
+    @field_validator("quote_anchor", "markout_anchor", mode="before")
+    @classmethod
+    def _normalise_anchor(cls, v):
+        if isinstance(v, str):
+            return v.lower()
+        return v
+
+    @model_validator(mode="after")
+    def _validate_anchor_and_builder(self) -> "MarketMakerSettings":
+        if self.quote_anchor != self.markout_anchor:
+            raise ValueError("quote_anchor and markout_anchor must match for coherent diagnostics")
+        if self.quote_anchor != QuoteAnchor.MID:
+            raise ValueError("this rollout currently supports MM_QUOTE_ANCHOR=mid only")
+
+        if not self.builder_program_enabled:
+            return self
+
+        if self.builder_id <= 0:
+            raise ValueError("builder_program_enabled=true requires MM_BUILDER_ID > 0")
+        if self.builder_fee_rate < 0:
+            raise ValueError("builder_fee_rate must be >= 0")
+        return self

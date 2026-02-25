@@ -57,6 +57,8 @@ _POSITION_REFRESH_INTERVAL_S = 30.0
 _FUNDING_REFRESH_INTERVAL_S = 300.0
 _BALANCE_REFRESH_INTERVAL_S = 10.0
 _DRAWDOWN_CHECK_INTERVAL_S = 1.0
+_MARGIN_GUARD_CHECK_INTERVAL_S = 1.0
+_KPI_WATCHDOG_INTERVAL_S = 5.0
 
 # Default circuit-breaker settings
 _CIRCUIT_BREAKER_MAX_FAILURES = 5
@@ -103,6 +105,8 @@ class MarketMakerStrategy:
         self._level_last_reprice_at: Dict[tuple[str, int], float] = {}
         # Stale-book grace tracking by slot
         self._level_stale_since: Dict[tuple[str, int], Optional[float]] = {}
+        # Cancel barrier by slot: blocks re-placement until WS terminal update arrives.
+        self._level_cancel_pending_ext_id: Dict[tuple[str, int], Optional[str]] = {}
         # Cancel reason tracking for journaling once cancellation is confirmed
         self._pending_cancel_reasons: Dict[str, str] = {}
 
@@ -110,15 +114,19 @@ class MarketMakerStrategy:
         self._seen_trade_ids: deque = deque()
         self._seen_trade_ids_set: Set[int] = set()
 
+        # Circuit-breaker / halt state
+        self._circuit_open = False
+        self._quote_halt_reasons: Set[str] = set()
+        self._margin_breach_since: Optional[float] = None
+        self._runtime_mode: str = "normal"
+        self._last_taker_leakage_warn_at: float = 0.0
+
         self._rebuild_components()
 
         self._funding_rate = Decimal("0")
         self._shutdown_reason = "shutdown"
 
         self._shutdown_event = asyncio.Event()
-
-        # Circuit-breaker state
-        self._circuit_open = False
 
     # ------------------------------------------------------------------
     # Class-level entry point
@@ -273,9 +281,16 @@ class MarketMakerStrategy:
         )
 
         while not self._shutdown_event.is_set():
+            self._sync_quote_halt_state()
             # Pause while circuit breaker is open
             if self._circuit_open:
                 await asyncio.sleep(1.0)
+                continue
+            if self._quote_halt_reasons:
+                await asyncio.sleep(0.2)
+                continue
+            if self._level_cancel_pending_ext_id.get(key) is not None:
+                await asyncio.sleep(0.1)
                 continue
 
             try:
@@ -310,6 +325,9 @@ class MarketMakerStrategy:
     # ------------------------------------------------------------------
 
     async def _maybe_reprice(self, side: OrderSide, level: int) -> None:
+        self._sync_quote_halt_state()
+        if self._quote_halt_reasons:
+            return
         market_ctx = self._build_reprice_market_context()
         await self._reprice.evaluate(self, side, level, market_ctx=market_ctx)
 
@@ -321,6 +339,10 @@ class MarketMakerStrategy:
             regime = RegimeState(regime="NORMAL")
             trend = TrendState()
         min_interval, max_order_age_s = self._volatility.cadence(regime)
+        rate_limit_multiplier = getattr(self._orders, "rate_limit_reprice_multiplier", Decimal("1"))
+        if not isinstance(rate_limit_multiplier, Decimal):
+            rate_limit_multiplier = Decimal("1")
+        min_interval *= float(rate_limit_multiplier)
         return RepriceMarketContext(
             regime=regime,
             trend=trend,
@@ -335,6 +357,7 @@ class MarketMakerStrategy:
         self._level_ext_ids[key] = None
         self._level_order_created_at[key] = None
         self._level_stale_since[key] = None
+        self._level_cancel_pending_ext_id[key] = None
 
     def _record_reprice_decision(
         self,
@@ -383,15 +406,19 @@ class MarketMakerStrategy:
         """Request cancel for a level order and store a structured reason.
 
         Returns True when the level slot can be safely freed:
-        - cancel request accepted, or
         - order already reached a terminal state.
+        A successful cancel request does not free the slot immediately;
+        replacement waits for WS terminal confirmation.
         """
         _ = (side, level)
+        pending_ext = self._level_cancel_pending_ext_id.get(key)
+        if pending_ext == external_id:
+            return False
         self._pending_cancel_reasons[external_id] = reason
         ok = await self._orders.cancel_order(external_id)
         if ok:
-            self._clear_level_slot(key)
-            return True
+            self._level_cancel_pending_ext_id[key] = external_id
+            return False
 
         # If the order is no longer active, treat it as terminal and free the slot.
         if self._orders.find_order_by_external_id(external_id) is not None:
@@ -592,10 +619,102 @@ class MarketMakerStrategy:
     def _request_shutdown(self, reason: str) -> None:
         if self._shutdown_event.is_set():
             return
+        self._set_runtime_mode("shutdown")
         self._shutdown_reason = reason
         self._shutdown_event.set()
 
+    def _set_runtime_mode(self, mode: str) -> None:
+        self._runtime_mode = str(mode)
+
+    def _is_normal_quoting_mode(self) -> bool:
+        return (
+            self._runtime_mode == "normal"
+            and not self._shutdown_event.is_set()
+            and not self._quote_halt_reasons
+        )
+
+    def _set_quote_halt(self, reason: str) -> None:
+        if reason in self._quote_halt_reasons:
+            return
+        self._quote_halt_reasons.add(reason)
+        logger.warning(
+            "Quote halt engaged for %s: reasons=%s",
+            self._settings.market_name,
+            sorted(self._quote_halt_reasons),
+        )
+        self._journal.record_exchange_event(
+            event_type="quote_halt",
+            details={"reason": reason, "reasons": sorted(self._quote_halt_reasons)},
+        )
+        self._metrics.set_quote_halt_state(self._quote_halt_reasons)
+
+    def _clear_quote_halt(self, reason: str) -> None:
+        if reason not in self._quote_halt_reasons:
+            return
+        self._quote_halt_reasons.discard(reason)
+        logger.info(
+            "Quote halt reason cleared for %s: %s (remaining=%s)",
+            self._settings.market_name,
+            reason,
+            sorted(self._quote_halt_reasons),
+        )
+        self._journal.record_exchange_event(
+            event_type="quote_halt_cleared",
+            details={"reason": reason, "remaining": sorted(self._quote_halt_reasons)},
+        )
+        self._metrics.set_quote_halt_state(self._quote_halt_reasons)
+
+    def _streams_healthy(self) -> bool:
+        account_ok = True
+        if hasattr(self._account_stream, "is_sequence_healthy"):
+            account_state = self._account_stream.is_sequence_healthy()
+            account_ok = account_state if isinstance(account_state, bool) else True
+        book_ok = True
+        if hasattr(self._ob, "is_sequence_healthy"):
+            book_state = self._ob.is_sequence_healthy()
+            book_ok = book_state if isinstance(book_state, bool) else True
+        has_data_fn = getattr(self._ob, "has_data", None)
+        has_data = has_data_fn() if callable(has_data_fn) else True
+        return account_ok and book_ok and has_data
+
+    async def _on_stream_desync(self, reason: str) -> None:
+        self._set_quote_halt("stream_desync")
+        self._journal.record_exchange_event(
+            event_type="stream_desync",
+            details={"reason": reason},
+        )
+        if self._orders.active_order_count() > 0:
+            try:
+                await self._orders.cancel_all_orders()
+            except Exception:
+                logger.debug("stream desync cancel-all failed", exc_info=True)
+
+    def _sync_quote_halt_state(self) -> None:
+        rate_limit_halt = getattr(self._orders, "in_rate_limit_halt", False)
+        if not isinstance(rate_limit_halt, bool):
+            rate_limit_halt = False
+        if rate_limit_halt:
+            self._set_quote_halt("rate_limit_halt")
+        else:
+            self._clear_quote_halt("rate_limit_halt")
+
+        if self._streams_healthy():
+            self._clear_quote_halt("stream_desync")
+        else:
+            self._set_quote_halt("stream_desync")
+        self._metrics.set_quote_halt_state(self._quote_halt_reasons)
+        self._metrics.set_margin_guard_breached(self._margin_breach_since is not None)
+
     def _rebuild_components(self) -> None:
+        quote_anchor = str(getattr(self._settings.quote_anchor, "value", self._settings.quote_anchor)).lower()
+        markout_anchor = str(
+            getattr(self._settings.markout_anchor, "value", self._settings.markout_anchor)
+        ).lower()
+        if quote_anchor != "mid" or markout_anchor != "mid":
+            raise ValueError(
+                "This rollout locks quote_anchor and markout_anchor to 'mid' for coherence."
+            )
+
         self._pricing = PricingEngine(
             settings=self._settings,
             orderbook_mgr=self._ob,
@@ -630,6 +749,8 @@ class MarketMakerStrategy:
         # Wire optional trackers into metrics.
         self._metrics.set_fill_quality_tracker(self._fill_quality)
         self._metrics.set_post_only_safety(self._post_only)
+        self._metrics.set_quote_halt_state(self._quote_halt_reasons)
+        self._metrics.set_margin_guard_breached(self._margin_breach_since is not None)
 
         # Keep legacy attribute names as aliases for one release cycle.
         self._level_pof_until = self._post_only.pof_until
@@ -710,6 +831,146 @@ class MarketMakerStrategy:
             except Exception:
                 logger.debug("Balance refresh failed", exc_info=True)
             await asyncio.sleep(_BALANCE_REFRESH_INTERVAL_S)
+
+    def _margin_guard_breach(self) -> tuple[bool, list[str], dict[str, Optional[Decimal]]]:
+        snapshot = self._risk.margin_snapshot()
+        reasons: list[str] = []
+
+        available = snapshot.get("available_for_trade")
+        equity = snapshot.get("equity")
+        initial_margin = snapshot.get("initial_margin")
+        available_ratio = snapshot.get("available_ratio")
+        margin_utilization = snapshot.get("margin_utilization")
+        liq_distance_bps = snapshot.get("liq_distance_bps")
+        current_position = self._risk.get_current_position()
+
+        if available is None:
+            reasons.append("available_for_trade_missing")
+        elif available < self._settings.min_available_balance_for_trading:
+            reasons.append("available_for_trade")
+
+        if self._settings.min_available_balance_ratio > 0:
+            if available_ratio is None or equity is None or equity <= 0:
+                reasons.append("available_ratio_missing")
+            elif available_ratio < self._settings.min_available_balance_ratio:
+                reasons.append("available_ratio")
+
+        if self._settings.max_margin_utilization > 0:
+            if margin_utilization is None or initial_margin is None or equity is None or equity <= 0:
+                reasons.append("margin_utilization_missing")
+            elif margin_utilization > self._settings.max_margin_utilization:
+                reasons.append("margin_utilization")
+
+        # Liquidation distance is only relevant while we hold risk.
+        if current_position != 0 and self._settings.min_liq_distance_bps > 0:
+            if liq_distance_bps is None:
+                reasons.append("liq_distance_missing")
+            elif liq_distance_bps < self._settings.min_liq_distance_bps:
+                reasons.append("liq_distance")
+
+        return bool(reasons), reasons, snapshot
+
+    async def _margin_guard_task(self) -> None:
+        while not self._shutdown_event.is_set():
+            try:
+                if not self._settings.margin_guard_enabled:
+                    await asyncio.sleep(_MARGIN_GUARD_CHECK_INTERVAL_S)
+                    continue
+
+                breached, reasons, snapshot = self._margin_guard_breach()
+                now = time.monotonic()
+                if breached:
+                    self._metrics.set_margin_guard_breached(True)
+                    self._set_quote_halt("margin_guard")
+                    if self._margin_breach_since is None:
+                        self._margin_breach_since = now
+                        self._journal.record_exchange_event(
+                            event_type="margin_guard_breach",
+                            details={
+                                "reasons": reasons,
+                                "snapshot": snapshot,
+                            },
+                        )
+                        if self._orders.active_order_count() > 0:
+                            await self._orders.cancel_all_orders()
+                    breach_elapsed = now - self._margin_breach_since
+                    if (
+                        self._settings.margin_guard_shutdown_breach_s > 0
+                        and breach_elapsed >= self._settings.margin_guard_shutdown_breach_s
+                    ):
+                        self._journal.record_exchange_event(
+                            event_type="margin_guard_shutdown",
+                            details={
+                                "reasons": reasons,
+                                "breach_elapsed_s": breach_elapsed,
+                                "snapshot": snapshot,
+                            },
+                        )
+                        self._request_shutdown("margin_guard")
+                        return
+                else:
+                    if self._margin_breach_since is not None:
+                        self._journal.record_exchange_event(
+                            event_type="margin_guard_cleared",
+                            details={"snapshot": snapshot},
+                        )
+                    self._margin_breach_since = None
+                    self._metrics.set_margin_guard_breached(False)
+                    self._clear_quote_halt("margin_guard")
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                logger.error("Margin guard task error: %s", exc, exc_info=True)
+                self._journal.record_error(
+                    component="margin_guard",
+                    exception_type=type(exc).__name__,
+                    message=str(exc),
+                    stack_trace_hash=TradeJournal.make_stack_trace_hash(exc),
+                )
+            await asyncio.sleep(_MARGIN_GUARD_CHECK_INTERVAL_S)
+
+    async def _kpi_watchdog_task(self) -> None:
+        while not self._shutdown_event.is_set():
+            try:
+                self._sync_quote_halt_state()
+
+                taker_count = (
+                    int(self._account_stream.taker_fill_count_1m())
+                    if hasattr(self._account_stream, "taker_fill_count_1m")
+                    else 0
+                )
+                taker_ratio = (
+                    Decimal(str(self._account_stream.taker_fill_notional_ratio_1m()))
+                    if hasattr(self._account_stream, "taker_fill_notional_ratio_1m")
+                    else Decimal("0")
+                )
+
+                now = time.monotonic()
+                if (
+                    taker_count > 0
+                    and self._is_normal_quoting_mode()
+                    and (now - self._last_taker_leakage_warn_at) >= 30.0
+                ):
+                    self._last_taker_leakage_warn_at = now
+                    logger.warning(
+                        "Taker leakage detected for %s: count_1m=%d notional_ratio_1m=%.2f%%",
+                        self._settings.market_name,
+                        taker_count,
+                        float(taker_ratio * Decimal("100")),
+                    )
+                    self._journal.record_exchange_event(
+                        event_type="taker_leakage_warning",
+                        details={
+                            "count_1m": taker_count,
+                            "notional_ratio_1m": taker_ratio,
+                            "runtime_mode": self._runtime_mode,
+                        },
+                    )
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                logger.error("KPI watchdog task error: %s", exc, exc_info=True)
+            await asyncio.sleep(_KPI_WATCHDOG_INTERVAL_S)
 
     def _order_age_exceeded(
         self,

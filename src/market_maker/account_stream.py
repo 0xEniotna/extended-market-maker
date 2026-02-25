@@ -15,9 +15,10 @@ import asyncio
 import logging
 import random
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Callable, List, Optional
+from typing import Awaitable, Callable, Deque, List, Optional
 
 from x10.perpetual.accounts import AccountStreamDataModel
 from x10.perpetual.configuration import EndpointConfig
@@ -72,6 +73,7 @@ OrderUpdateCallback = Callable[[OpenOrderModel], None]
 PositionUpdateCallback = Callable[[PositionModel], None]
 FillCallback = Callable[[FillEvent], None]
 BalanceUpdateCallback = Callable[[object], None]
+FailSafeCallback = Callable[[str], Awaitable[None] | None]
 
 
 class AccountStreamManager:
@@ -106,6 +108,12 @@ class AccountStreamManager:
         # Optional references set by the runner for health monitoring.
         self._order_mgr: Optional[object] = None
         self._journal: Optional[object] = None
+        self._fail_safe_handler: Optional[FailSafeCallback] = None
+
+        self._connected: bool = False
+        self._sequence_healthy: bool = True
+        self._last_seq: Optional[int] = None
+        self._rolling_fill_window_1m: Deque[tuple[float, Decimal, bool]] = deque()
 
         # Public metrics
         self.metrics = AccountStreamMetrics()
@@ -141,6 +149,57 @@ class AccountStreamManager:
     def set_journal(self, journal: object) -> None:
         """Set the trade journal reference for event recording."""
         self._journal = journal
+
+    def set_fail_safe_handler(self, cb: FailSafeCallback) -> None:
+        """Register async callback invoked on stream sequence/disconnect faults."""
+        self._fail_safe_handler = cb
+
+    def is_connected(self) -> bool:
+        return self._connected
+
+    def is_sequence_healthy(self) -> bool:
+        return self._sequence_healthy and self._connected
+
+    def taker_fill_count_1m(self) -> int:
+        self._prune_fill_window()
+        return sum(1 for _, _, is_taker in self._rolling_fill_window_1m if is_taker)
+
+    def taker_fill_notional_ratio_1m(self) -> Decimal:
+        self._prune_fill_window()
+        if not self._rolling_fill_window_1m:
+            return Decimal("0")
+        total = sum(notional for _, notional, _ in self._rolling_fill_window_1m)
+        if total <= 0:
+            return Decimal("0")
+        taker = sum(
+            notional for _, notional, is_taker in self._rolling_fill_window_1m if is_taker
+        )
+        return taker / total
+
+    def _prune_fill_window(self) -> None:
+        cutoff = time.monotonic() - 60.0
+        while self._rolling_fill_window_1m and self._rolling_fill_window_1m[0][0] < cutoff:
+            self._rolling_fill_window_1m.popleft()
+
+    async def _trigger_fail_safe(self, reason: str) -> None:
+        """Cancel orders and notify strategy when stream health is compromised."""
+        if self._order_mgr is not None:
+            count_fn = getattr(self._order_mgr, "active_order_count", None)
+            has_active = bool(count_fn() > 0) if count_fn is not None else False
+            if has_active:
+                cancel_fn = getattr(self._order_mgr, "cancel_all_orders", None)
+                if cancel_fn is not None:
+                    try:
+                        await cancel_fn()
+                    except Exception as exc:
+                        logger.error("Fail-safe cancel_all_orders failed: %s", exc)
+        if self._fail_safe_handler is not None:
+            try:
+                maybe = self._fail_safe_handler(reason)
+                if asyncio.iscoroutine(maybe):
+                    await maybe
+            except Exception as exc:
+                logger.error("Fail-safe callback error: %s", exc)
 
     async def start(self) -> None:
         """Start the background stream task and connection health watchdog."""
@@ -182,6 +241,8 @@ class AccountStreamManager:
                     self._api_key
                 ) as stream:
                     logger.info("Account stream connected")
+                    self._connected = True
+                    self._last_seq = None
                     consecutive_failures = 0  # connected successfully
                     async for event in stream:
                         got_event = True
@@ -189,6 +250,9 @@ class AccountStreamManager:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                self._connected = False
+                self._sequence_healthy = False
+                await self._trigger_fail_safe("account_stream_error")
                 consecutive_failures += 1
                 backoff = min(
                     _STREAM_BACKOFF_BASE_S * (2 ** (consecutive_failures - 1)),
@@ -216,6 +280,9 @@ class AccountStreamManager:
                     _STREAM_BACKOFF_MAX_S,
                 )
                 delay = backoff + random.uniform(0.0, _STREAM_JITTER_MAX_S)
+            self._connected = False
+            self._sequence_healthy = False
+            await self._trigger_fail_safe("account_stream_disconnect")
             logger.warning(
                 "Account stream ended — reconnecting in %.1fs", delay,
             )
@@ -304,6 +371,22 @@ class AccountStreamManager:
     async def _handle_event(
         self, event: WrappedStreamResponse[AccountStreamDataModel]
     ) -> None:
+        current_seq = int(getattr(event, "seq", 0))
+        if self._last_seq is not None and current_seq != (self._last_seq + 1):
+            self._sequence_healthy = False
+            logger.critical(
+                "Account stream sequence gap detected for %s: prev=%s current=%s",
+                self._market_name,
+                self._last_seq,
+                current_seq,
+            )
+            await self._trigger_fail_safe("account_stream_seq_gap")
+            raise RuntimeError(
+                f"account_stream_seq_gap prev={self._last_seq} current={current_seq}"
+            )
+        self._last_seq = current_seq
+        self._sequence_healthy = True
+
         data: Optional[AccountStreamDataModel] = event.data
         if data is None:
             return
@@ -375,6 +458,10 @@ class AccountStreamManager:
     def _dispatch_trade(self, trade: AccountTradeModel) -> None:
         self.metrics.fills += 1
         self.metrics.total_fees += trade.fee
+        self._rolling_fill_window_1m.append(
+            (time.monotonic(), trade.qty * trade.price, bool(trade.is_taker))
+        )
+        self._prune_fill_window()
 
         fill = FillEvent(
             trade_id=trade.id,

@@ -29,6 +29,17 @@ from x10.perpetual.orders import (
 )
 from x10.perpetual.trading_client import PerpetualTradingClient
 
+from .fee_resolver import FeeResolver
+
+try:
+    from x10.utils.http import RateLimitException as _RateLimitException
+    if not isinstance(_RateLimitException, type) or not issubclass(_RateLimitException, BaseException):
+        raise TypeError("invalid RateLimitException type")
+    RateLimitException = _RateLimitException
+except Exception:  # pragma: no cover - test stubs may not expose this
+    class RateLimitException(Exception):
+        pass
+
 logger = logging.getLogger(__name__)
 
 # Terminal order statuses that mean the order is no longer live
@@ -91,9 +102,17 @@ class OrderManager:
         *,
         max_orders_per_second: float = 10.0,
         maintenance_pause_s: float = 60.0,
+        fee_resolver: Optional[FeeResolver] = None,
+        rate_limit_degraded_s: float = 20.0,
+        rate_limit_halt_window_s: float = 60.0,
+        rate_limit_halt_hits: int = 5,
+        rate_limit_halt_s: float = 30.0,
+        rate_limit_extra_offset_bps: Decimal = Decimal("5"),
+        rate_limit_reprice_multiplier: Decimal = Decimal("2"),
     ) -> None:
         self._client = trading_client
         self._market_name = market_name
+        self._fee_resolver = fee_resolver
         self._active_orders: Dict[str, OrderInfo] = {}
         self._recent_orders_by_external_id: Dict[str, OrderInfo] = {}
         self._orders_by_exchange_id: Dict[str, OrderInfo] = {}
@@ -129,6 +148,19 @@ class OrderManager:
         # --- Exchange maintenance detection ---
         self._maintenance_pause_s = maintenance_pause_s
         self._maintenance_until: float = 0.0
+
+        # --- Rate-limit defensive state ---
+        self._rate_limit_degraded_s = max(0.0, float(rate_limit_degraded_s))
+        self._rate_limit_halt_window_s = max(1.0, float(rate_limit_halt_window_s))
+        self._rate_limit_halt_hits = max(1, int(rate_limit_halt_hits))
+        self._rate_limit_halt_s = max(1.0, float(rate_limit_halt_s))
+        self._rate_limit_extra_offset_bps = max(Decimal("0"), Decimal(str(rate_limit_extra_offset_bps)))
+        self._rate_limit_reprice_multiplier = max(
+            Decimal("1"), Decimal(str(rate_limit_reprice_multiplier))
+        )
+        self._rate_limit_hit_ts: deque[float] = deque()
+        self._rate_limit_degraded_until: float = 0.0
+        self._rate_limit_halt_until: float = 0.0
 
         # --- In-flight operation tracking (for graceful session close) ---
         self._inflight_count: int = 0
@@ -191,6 +223,64 @@ class OrderManager:
     def maintenance_remaining_s(self) -> float:
         """Seconds remaining in maintenance pause, or 0 if not in maintenance."""
         return max(0.0, self._maintenance_until - time.monotonic())
+
+    @property
+    def in_rate_limit_degraded(self) -> bool:
+        return time.monotonic() < self._rate_limit_degraded_until
+
+    @property
+    def in_rate_limit_halt(self) -> bool:
+        return time.monotonic() < self._rate_limit_halt_until
+
+    @property
+    def rate_limit_extra_offset_bps(self) -> Decimal:
+        return self._rate_limit_extra_offset_bps if self.in_rate_limit_degraded else Decimal("0")
+
+    @property
+    def rate_limit_reprice_multiplier(self) -> Decimal:
+        return self._rate_limit_reprice_multiplier if self.in_rate_limit_degraded else Decimal("1")
+
+    def rate_limit_hits_in_window(self) -> int:
+        self._prune_rate_limit_hits()
+        return len(self._rate_limit_hit_ts)
+
+    def _prune_rate_limit_hits(self, now: Optional[float] = None) -> None:
+        now = now if now is not None else time.monotonic()
+        cutoff = now - self._rate_limit_halt_window_s
+        while self._rate_limit_hit_ts and self._rate_limit_hit_ts[0] < cutoff:
+            self._rate_limit_hit_ts.popleft()
+
+    def _record_rate_limit_hit(self) -> bool:
+        now = time.monotonic()
+        self._rate_limit_hit_ts.append(now)
+        self._prune_rate_limit_hits(now)
+        if self._rate_limit_degraded_s > 0:
+            self._rate_limit_degraded_until = max(
+                self._rate_limit_degraded_until,
+                now + self._rate_limit_degraded_s,
+            )
+
+        should_halt = len(self._rate_limit_hit_ts) >= self._rate_limit_halt_hits
+        if should_halt:
+            self._rate_limit_halt_until = max(
+                self._rate_limit_halt_until,
+                now + self._rate_limit_halt_s,
+            )
+            logger.error(
+                "Rate-limit halt triggered for %s: hits=%d window=%.0fs halt=%.0fs",
+                self._market_name,
+                len(self._rate_limit_hit_ts),
+                self._rate_limit_halt_window_s,
+                self._rate_limit_halt_s,
+            )
+        else:
+            logger.warning(
+                "Rate-limit degraded mode for %s: hits=%d degraded_until=%.1f",
+                self._market_name,
+                len(self._rate_limit_hit_ts),
+                self._rate_limit_degraded_until,
+            )
+        return should_halt
 
     def _check_maintenance_response(self, resp=None, exc: Optional[Exception] = None) -> bool:
         """Return True and enter maintenance state if response/exception indicates 503."""
@@ -388,6 +478,25 @@ class OrderManager:
                 self.maintenance_remaining_s,
             )
             return None
+        if self.in_rate_limit_halt:
+            logger.warning(
+                "Skipping order placement during rate-limit halt (%.0fs remaining)",
+                max(0.0, self._rate_limit_halt_until - time.monotonic()),
+            )
+            return None
+
+        fee_cfg = None
+        if self._fee_resolver is not None:
+            fee_cfg = await self._fee_resolver.resolve_order_fees(
+                post_only=True,
+                fail_closed=True,
+            )
+            if fee_cfg is None:
+                logger.error(
+                    "Skipping post-only placement for %s: unable to resolve maker max-fee rate",
+                    self._market_name,
+                )
+                return None
 
         # --- Rate limiter ---
         try:
@@ -426,6 +535,9 @@ class OrderManager:
                 time_in_force=TimeInForce.GTT,
                 post_only=True,
                 external_id=external_id,
+                max_fee_rate=fee_cfg.max_fee_rate if fee_cfg is not None else None,
+                builder_fee_rate=fee_cfg.builder_fee_rate if fee_cfg is not None else None,
+                builder_id=fee_cfg.builder_id if fee_cfg is not None else None,
             )
 
             # --- Maintenance detection on response ---
@@ -488,6 +600,21 @@ class OrderManager:
             )
             return external_id
 
+        except RateLimitException as exc:
+            should_halt = self._record_rate_limit_hit()
+            self._pending_placements.pop(external_id, None)
+            self._placement_send_ts.pop(external_id, None)
+            if should_halt:
+                asyncio.create_task(self.cancel_all_orders())
+            logger.error(
+                "Rate-limited placing order: side=%s price=%s size=%s level=%d error=%s",
+                side,
+                price,
+                size,
+                level,
+                exc,
+            )
+            return None
         except Exception as exc:
             # --- Maintenance detection on exception ---
             if self._check_maintenance_response(exc=exc):
@@ -532,6 +659,15 @@ class OrderManager:
             # will deliver the CANCELLED event and handle_order_update()
             # will do the cleanup.
             return True
+        except RateLimitException as exc:
+            self._record_rate_limit_hit()
+            logger.warning(
+                "Cancel rate-limited for ext_id=%s exchange_id=%s: %s",
+                external_id,
+                info.exchange_order_id,
+                exc,
+            )
+            return False
         except Exception as exc:
             logger.warning(
                 "Cancel failed for ext_id=%s exchange_id=%s: %s",
@@ -565,6 +701,19 @@ class OrderManager:
                 self._market_name,
                 len(self._pending_cancel),
             )
+        except RateLimitException as exc:
+            should_halt = self._record_rate_limit_hit()
+            logger.error(
+                "Mass cancel rate-limited for market=%s: %s",
+                self._market_name,
+                exc,
+            )
+            if should_halt:
+                # Keep pending_cancel; ws terminal events can still reconcile.
+                self._rate_limit_halt_until = max(
+                    self._rate_limit_halt_until,
+                    time.monotonic() + self._rate_limit_halt_s,
+                )
         except Exception as exc:
             logger.error(
                 "Mass cancel failed for market=%s: %s — falling back to per-order cancel",
@@ -720,6 +869,12 @@ class OrderManager:
             price = tick_size if tick_size > 0 else Decimal("1")
 
         external_id = f"mm-flat-{uuid.uuid4().hex[:12]}"
+        fee_cfg = None
+        if self._fee_resolver is not None:
+            fee_cfg = await self._fee_resolver.resolve_order_fees(
+                post_only=False,
+                fail_closed=False,
+            )
         try:
             resp = await self._client.place_order(
                 market_name=self._market_name,
@@ -731,6 +886,9 @@ class OrderManager:
                 post_only=False,
                 reduce_only=True,
                 external_id=external_id,
+                max_fee_rate=fee_cfg.max_fee_rate if fee_cfg is not None else None,
+                builder_fee_rate=fee_cfg.builder_fee_rate if fee_cfg is not None else None,
+                builder_id=fee_cfg.builder_id if fee_cfg is not None else None,
             )
             if hasattr(resp, "status") and hasattr(resp, "error"):
                 if resp.status != "OK" or resp.error is not None:
@@ -776,6 +934,25 @@ class OrderManager:
                 size=close_size,
                 price=price,
                 remaining_position=remaining_position,
+            )
+        except RateLimitException as exc:
+            should_halt = self._record_rate_limit_hit()
+            if should_halt:
+                asyncio.create_task(self.cancel_all_orders())
+            logger.exception(
+                "Rate-limited flatten order submit: market=%s side=%s size=%s price=%s",
+                self._market_name,
+                side,
+                close_size,
+                price,
+            )
+            return FlattenResult(
+                attempted=True,
+                success=False,
+                reason=f"rate_limited:{exc}",
+                side=side,
+                size=close_size,
+                price=price,
             )
         except Exception as exc:
             logger.exception(

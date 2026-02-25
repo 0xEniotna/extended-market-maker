@@ -17,7 +17,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional
 
 from x10.perpetual.configuration import EndpointConfig
 from x10.perpetual.orderbook import OrderBook
@@ -99,6 +99,8 @@ class OrderbookManager:
         self._reconnect_task: Optional[asyncio.Task] = None
         self._reconnect_attempts: int = 0
         self._stopped: bool = False
+        self._sequence_healthy: bool = True
+        self._fail_safe_handler: Optional[Callable[[str], Awaitable[None] | None]] = None
 
     # ------------------------------------------------------------------
     # Public interface
@@ -107,6 +109,7 @@ class OrderbookManager:
     async def start(self) -> None:
         """Create and start the orderbook subscription with native callbacks."""
         self._stopped = False
+        self._sequence_healthy = True
         await self._create_orderbook()
         # Start the watchdog that auto-reconnects on prolonged staleness.
         self._reconnect_task = asyncio.create_task(
@@ -122,6 +125,8 @@ class OrderbookManager:
             best_bid_change_callback=self._on_bid_change,
             best_ask_change_callback=self._on_ask_change,
             orderbook_update_callback=self._on_orderbook_update,
+            sequence_gap_callback=self._on_sequence_gap,
+            snapshot_callback=self._on_snapshot,
             start=True,
             depth=self._depth,
         )
@@ -172,6 +177,14 @@ class OrderbookManager:
         we just need to know the first snapshot has arrived.
         """
         return self._last_bid is not None and self._last_ask is not None
+
+    def set_fail_safe_handler(
+        self, cb: Callable[[str], Awaitable[None] | None]
+    ) -> None:
+        self._fail_safe_handler = cb
+
+    def is_sequence_healthy(self) -> bool:
+        return self._sequence_healthy
 
     def is_stale(self) -> bool:
         """Return True if orderbook data is stale (without warning logs)."""
@@ -356,6 +369,28 @@ class OrderbookManager:
     async def _on_orderbook_update(self) -> None:
         """Called by the SDK for every orderbook snapshot/delta event."""
         self._mark_stream_update()
+
+    async def _on_snapshot(self, seq: int) -> None:
+        _ = seq
+        if not self._sequence_healthy:
+            logger.info("Orderbook sequence healthy again for %s", self._market_name)
+        self._sequence_healthy = True
+
+    async def _on_sequence_gap(self, prev_seq: int, current_seq: int) -> None:
+        self._sequence_healthy = False
+        logger.critical(
+            "Orderbook sequence gap detected for %s: prev=%s current=%s",
+            self._market_name,
+            prev_seq,
+            current_seq,
+        )
+        if self._fail_safe_handler is not None:
+            try:
+                maybe = self._fail_safe_handler("orderbook_seq_gap")
+                if asyncio.iscoroutine(maybe):
+                    await maybe
+            except Exception as exc:
+                logger.error("Orderbook fail-safe callback error: %s", exc)
 
     async def _on_bid_change(self, raw_bid) -> None:
         """Called by the SDK when the best bid changes.

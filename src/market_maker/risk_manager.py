@@ -67,6 +67,9 @@ class RiskManager:
         self._cached_equity: Decimal | None = None
         self._cached_initial_margin: Decimal | None = None
         self._cached_balance_updated_at: float | None = None
+        self._cached_mark_price: Decimal | None = None
+        self._cached_liquidation_price: Decimal | None = None
+        self._cached_position_updated_at: float | None = None
 
         # In-flight order notional tracker.
         # Keyed by external_id → notional (size * price) reserved at submission.
@@ -104,6 +107,8 @@ class RiskManager:
         if pos.status == PositionStatus.CLOSED:
             self._cached_position = Decimal("0")
             self._reset_position_pnl()
+            self._cached_mark_price = None
+            self._cached_liquidation_price = None
         else:
             sign = Decimal("-1") if pos.side == PositionSide.SHORT else Decimal("1")
             self._cached_position = pos.size * sign
@@ -111,6 +116,19 @@ class RiskManager:
                 realized=getattr(pos, "realised_pnl", Decimal("0")),
                 unrealized=getattr(pos, "unrealised_pnl", Decimal("0")),
             )
+            mark_price = getattr(pos, "mark_price", None)
+            self._cached_mark_price = (
+                Decimal(str(mark_price))
+                if mark_price is not None
+                else self._cached_mark_price
+            )
+            liq_price = getattr(pos, "liquidation_price", None)
+            self._cached_liquidation_price = (
+                Decimal(str(liq_price))
+                if liq_price is not None
+                else None
+            )
+        self._cached_position_updated_at = time.monotonic()
 
         logger.debug(
             "Position updated (stream): %s %s (raw side=%s size=%s pnl=%s)",
@@ -159,11 +177,31 @@ class RiskManager:
                     realized=realized if realized is not None else Decimal("0"),
                     unrealized=unrealized if unrealized is not None else Decimal("0"),
                 )
+                mark_price = getattr(pos, "mark_price", None)
+                if mark_price is None and isinstance(pos, dict):
+                    mark_price = pos.get("mark_price")
+                self._cached_mark_price = (
+                    Decimal(str(mark_price))
+                    if mark_price is not None
+                    else self._cached_mark_price
+                )
+                liq_price = getattr(pos, "liquidation_price", None)
+                if liq_price is None and isinstance(pos, dict):
+                    liq_price = pos.get("liquidation_price")
+                self._cached_liquidation_price = (
+                    Decimal(str(liq_price))
+                    if liq_price is not None
+                    else None
+                )
+                self._cached_position_updated_at = time.monotonic()
                 return self._cached_position
 
             # No position found for this market
             self._cached_position = Decimal("0")
             self._reset_position_pnl()
+            self._cached_mark_price = None
+            self._cached_liquidation_price = None
+            self._cached_position_updated_at = time.monotonic()
             return self._cached_position
         except Exception as exc:
             logger.error("Failed to fetch position: %s", exc)
@@ -200,6 +238,72 @@ class RiskManager:
     def get_available_for_trade(self) -> Decimal | None:
         """Return the last cached available-for-trade collateral."""
         return self._cached_available_for_trade
+
+    def get_equity(self) -> Decimal | None:
+        """Return cached account equity."""
+        return self._cached_equity
+
+    def get_initial_margin(self) -> Decimal | None:
+        """Return cached account initial margin."""
+        return self._cached_initial_margin
+
+    def available_balance_ratio(self) -> Decimal | None:
+        """Return available_for_trade / equity if both are known and equity > 0."""
+        if (
+            self._cached_available_for_trade is None
+            or self._cached_equity is None
+            or self._cached_equity <= 0
+        ):
+            return None
+        return self._cached_available_for_trade / self._cached_equity
+
+    def margin_utilization(self) -> Decimal | None:
+        """Return initial_margin / equity if both are known and equity > 0."""
+        if (
+            self._cached_initial_margin is None
+            or self._cached_equity is None
+            or self._cached_equity <= 0
+        ):
+            return None
+        return self._cached_initial_margin / self._cached_equity
+
+    def get_mark_price(self) -> Decimal | None:
+        """Return cached mark price for the tracked market position."""
+        return self._cached_mark_price
+
+    def get_liquidation_price(self) -> Decimal | None:
+        """Return cached liquidation price for the tracked market position."""
+        return self._cached_liquidation_price
+
+    def liquidation_distance_bps(self) -> Decimal | None:
+        """Return absolute distance (bps) between mark and liquidation prices."""
+        if self._cached_position == 0:
+            return None
+        if (
+            self._cached_mark_price is None
+            or self._cached_mark_price <= 0
+            or self._cached_liquidation_price is None
+            or self._cached_liquidation_price <= 0
+        ):
+            return None
+        return (
+            abs(self._cached_mark_price - self._cached_liquidation_price)
+            / self._cached_mark_price
+            * Decimal("10000")
+        )
+
+    def margin_snapshot(self) -> Dict[str, Decimal | None]:
+        """Return a lightweight margin/liquidation state snapshot."""
+        return {
+            "available_for_trade": self._cached_available_for_trade,
+            "equity": self._cached_equity,
+            "initial_margin": self._cached_initial_margin,
+            "available_ratio": self.available_balance_ratio(),
+            "margin_utilization": self.margin_utilization(),
+            "mark_price": self._cached_mark_price,
+            "liquidation_price": self._cached_liquidation_price,
+            "liq_distance_bps": self.liquidation_distance_bps(),
+        }
 
     def _effective_max_position_for_side(self, side: OrderSide) -> Decimal:
         """Return the effective max position size for the given side.

@@ -215,6 +215,7 @@ class TradeJournal:
         best_bid: Optional[Decimal],
         best_ask: Optional[Decimal],
         position: Decimal,
+        quote_lifetime_ms: Optional[Decimal] = None,
         market_snapshot: Optional[Dict[str, Any]] = None,
     ) -> None:
         mid = None
@@ -244,6 +245,7 @@ class TradeJournal:
             "spread_bps": spread_bps,
             "edge_bps": edge_bps,
             "position": position,
+            "quote_lifetime_ms": quote_lifetime_ms,
             "market_snapshot": market_snapshot,
         })
 
