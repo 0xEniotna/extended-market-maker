@@ -547,6 +547,17 @@ class TestSpreadEma:
         assert after_spike > baseline
         assert after_spike < Decimal("50")  # way less than the raw spike
 
+    def test_stream_heartbeat_marks_orderbook_fresh(self):
+        ob = OrderbookManager.__new__(OrderbookManager)
+        ob._market_name = "TEST-USD"
+        ob._last_update_ts = 0.0
+        ob._was_stale = True
+
+        asyncio.run(ob._on_orderbook_update())
+
+        assert ob._last_update_ts > 0.0
+        assert ob._was_stale is False
+
 
 class TestAdaptivePof:
     def test_pof_reject_increases_dynamic_ticks(self):
@@ -576,6 +587,22 @@ class TestImbalancePause:
 
         await s._maybe_reprice(OrderSide.SELL, 0)
         s._orders.place_order.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_imbalance_override_allows_inventory_reducing_side_when_warn(self):
+        s = _make_strategy(position=Decimal("170"), max_position_size=Decimal("300"))
+        s._ob._imbalance = Decimal("0.9")
+        s._settings.imbalance_pause_threshold = Decimal("0.7")
+        s._orders.place_order = AsyncMock(return_value="ext-1")
+
+        await s._maybe_reprice(OrderSide.SELL, 0)
+        s._orders.place_order.assert_awaited_once()
+
+        reasons = [
+            call.kwargs.get("reason")
+            for call in s._journal.record_reprice_decision.call_args_list
+        ]
+        assert "allow_imbalance_inventory_override" in reasons
 
 
 class TestInventoryBands:
@@ -610,6 +637,49 @@ class TestTrendOneWay:
 
         await s._maybe_reprice(OrderSide.SELL, 1)
         s._orders.place_order.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_one_way_trend_allows_counter_side_when_reducing_warn_inventory(self):
+        s = _make_strategy(
+            market_profile="crypto",
+            position=Decimal("170"),
+            max_position_size=Decimal("300"),
+        )
+        s._settings.trend_one_way_enabled = True
+        s._settings.trend_cancel_counter_on_strong = False
+        s._settings.trend_strong_threshold = Decimal("0.7")
+        s._orders.place_order = AsyncMock(return_value="ext-1")
+        s._trend_signal = SimpleNamespace(
+            evaluate=lambda: TrendState(direction="BULLISH", strength=Decimal("1.0"))
+        )
+
+        await s._maybe_reprice(OrderSide.SELL, 0)
+        s._orders.place_order.assert_awaited_once()
+
+        reasons = [
+            call.kwargs.get("reason")
+            for call in s._journal.record_reprice_decision.call_args_list
+        ]
+        assert "allow_trend_counter_inventory_override" in reasons
+        assert "allow_trend_size_inventory_override" in reasons
+
+    @pytest.mark.asyncio
+    async def test_one_way_trend_allows_buy_when_short_and_bearish(self):
+        s = _make_strategy(
+            market_profile="crypto",
+            position=Decimal("-170"),
+            max_position_size=Decimal("300"),
+        )
+        s._settings.trend_one_way_enabled = True
+        s._settings.trend_cancel_counter_on_strong = False
+        s._settings.trend_strong_threshold = Decimal("0.7")
+        s._orders.place_order = AsyncMock(return_value="ext-1")
+        s._trend_signal = SimpleNamespace(
+            evaluate=lambda: TrendState(direction="BEARISH", strength=Decimal("1.0"))
+        )
+
+        await s._maybe_reprice(OrderSide.BUY, 0)
+        s._orders.place_order.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_one_way_trend_can_cancel_resting_counter_side(self):
@@ -648,6 +718,30 @@ class TestTrendOneWay:
 
         await s._maybe_reprice(OrderSide.SELL, 1)
         s._orders.place_order.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_trend_size_cut_bypassed_for_inventory_reducing_side_when_warn(self):
+        s = _make_strategy(
+            market_profile="crypto",
+            position=Decimal("170"),
+            max_position_size=Decimal("300"),
+        )
+        s._settings.trend_one_way_enabled = False
+        s._settings.trend_strong_threshold = Decimal("0.7")
+        s._orders.place_order = AsyncMock(return_value="ext-1")
+        s._trend_signal = SimpleNamespace(
+            evaluate=lambda: TrendState(direction="BULLISH", strength=Decimal("1.0"))
+        )
+
+        await s._maybe_reprice(OrderSide.SELL, 0)
+        s._orders.place_order.assert_awaited_once()
+        assert s._orders.place_order.await_args.kwargs["size"] > Decimal("0")
+
+        reasons = [
+            call.kwargs.get("reason")
+            for call in s._journal.record_reprice_decision.call_args_list
+        ]
+        assert "allow_trend_size_inventory_override" in reasons
 
 
 class TestDrawdownStop:

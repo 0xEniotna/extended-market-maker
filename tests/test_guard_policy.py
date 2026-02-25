@@ -55,6 +55,44 @@ def test_sets_and_honors_imbalance_pause():
     assert second.reason == "skip_imbalance_pause"
 
 
+def test_inventory_override_bypasses_imbalance_block():
+    policy = GuardPolicy(_settings())
+    decision = policy.check(
+        side="SELL",
+        level=0,
+        spread_bps=Decimal("5"),
+        imbalance=Decimal("0.9"),
+        regime=RegimeState(regime="NORMAL"),
+        inventory_override=True,
+    )
+    assert decision.allow
+    assert decision.reason == "allow_imbalance_inventory_override"
+
+
+def test_inventory_override_bypasses_existing_imbalance_pause():
+    policy = GuardPolicy(_settings())
+    first = policy.check(
+        side="SELL",
+        level=0,
+        spread_bps=Decimal("5"),
+        imbalance=Decimal("0.9"),
+        regime=RegimeState(regime="NORMAL"),
+    )
+    assert not first.allow
+    assert first.reason == "skip_imbalance"
+
+    decision = policy.check(
+        side="SELL",
+        level=0,
+        spread_bps=Decimal("5"),
+        imbalance=Decimal("0"),
+        regime=RegimeState(regime="NORMAL"),
+        inventory_override=True,
+    )
+    assert decision.allow
+    assert decision.reason == "allow_imbalance_inventory_override"
+
+
 def test_extreme_regime_pauses_with_cooldown():
     policy = GuardPolicy(_settings())
     first = policy.check(

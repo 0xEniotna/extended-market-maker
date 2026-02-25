@@ -356,6 +356,14 @@ class MarketMakerSettings(BaseSettings):
             "Grace period in seconds before cancelling resting orders on stale orderbook data."
         ),
     )
+    orderbook_staleness_threshold_s: float = Field(
+        default=15.0,
+        gt=0,
+        description=(
+            "Seconds since last orderbook stream event before data is considered stale. "
+            "Set per-market via env (MM_ORDERBOOK_STALENESS_THRESHOLD_S)."
+        ),
+    )
 
     # --- Per-Level Size Scaling ---
     size_scale_per_level: Decimal = Field(

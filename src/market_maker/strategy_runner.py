@@ -160,7 +160,11 @@ def _build_runtime_context(
     min_order_size_change: Decimal,
     order_size: Decimal,
 ) -> RuntimeContext:
-    ob_mgr = OrderbookManager(settings.endpoint_config, settings.market_name)
+    ob_mgr = OrderbookManager(
+        settings.endpoint_config,
+        settings.market_name,
+        staleness_threshold_s=settings.orderbook_staleness_threshold_s,
+    )
     order_mgr = OrderManager(
         trading_client,
         settings.market_name,

@@ -22,6 +22,7 @@ class GuardPolicy:
         spread_bps,
         imbalance,
         regime: RegimeState,
+        inventory_override: bool = False,
     ) -> GuardDecision:
         key = (str(side), level)
         side_name = str(side).upper()
@@ -35,6 +36,11 @@ class GuardPolicy:
         pause_threshold = self._settings.imbalance_pause_threshold
         pause_until = self._level_imbalance_pause_until.get(key, 0.0)
         if now < pause_until:
+            if inventory_override:
+                return GuardDecision(
+                    allow=True,
+                    reason="allow_imbalance_inventory_override",
+                )
             return GuardDecision(
                 allow=False,
                 reason="skip_imbalance_pause",
@@ -57,6 +63,11 @@ class GuardPolicy:
                 or ((not is_sell) and imbalance < -pause_threshold)
             )
         ):
+            if inventory_override:
+                return GuardDecision(
+                    allow=True,
+                    reason="allow_imbalance_inventory_override",
+                )
             pause_for = max(1.0, float(self._settings.imbalance_window_s))
             until = now + pause_for
             self._level_imbalance_pause_until[key] = until

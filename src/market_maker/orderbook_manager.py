@@ -48,8 +48,9 @@ class OrderbookManager:
     when the best bid or ask changes.
 
     Uses the SDK's native ``best_bid_change_callback`` /
-    ``best_ask_change_callback`` for zero-latency notification instead of
-    a polling loop.
+    ``best_ask_change_callback`` for zero-latency notification, plus a
+    stream heartbeat callback so staleness tracks any orderbook event
+    (not only top-of-book changes).
     """
 
     def __init__(
@@ -120,6 +121,7 @@ class OrderbookManager:
             market_name=self._market_name,
             best_bid_change_callback=self._on_bid_change,
             best_ask_change_callback=self._on_ask_change,
+            orderbook_update_callback=self._on_orderbook_update,
             start=True,
             depth=self._depth,
         )
@@ -345,6 +347,16 @@ class OrderbookManager:
     # SDK callbacks (called from the OrderBook WS task)
     # ------------------------------------------------------------------
 
+    def _mark_stream_update(self) -> None:
+        self._last_update_ts = time.monotonic()
+        if self._was_stale:
+            self._was_stale = False
+            logger.info("Orderbook data fresh again for %s", self._market_name)
+
+    async def _on_orderbook_update(self) -> None:
+        """Called by the SDK for every orderbook snapshot/delta event."""
+        self._mark_stream_update()
+
     async def _on_bid_change(self, raw_bid) -> None:
         """Called by the SDK when the best bid changes.
 
@@ -356,13 +368,10 @@ class OrderbookManager:
             if new_bid is None:
                 return
             self._last_bid = new_bid
-            self._last_update_ts = time.monotonic()
+            self._mark_stream_update()
             self._update_spread_ema()
             self._record_mid()
             self._record_imbalance()
-            if self._was_stale:
-                self._was_stale = False
-                logger.info("Orderbook data fresh again for %s", self._market_name)
             async with self.best_bid_condition:
                 self.best_bid_condition.notify_all()
         except Exception as exc:
@@ -379,13 +388,10 @@ class OrderbookManager:
             if new_ask is None:
                 return
             self._last_ask = new_ask
-            self._last_update_ts = time.monotonic()
+            self._mark_stream_update()
             self._update_spread_ema()
             self._record_mid()
             self._record_imbalance()
-            if self._was_stale:
-                self._was_stale = False
-                logger.info("Orderbook data fresh again for %s", self._market_name)
             async with self.best_ask_condition:
                 self.best_ask_condition.notify_all()
         except Exception as exc:

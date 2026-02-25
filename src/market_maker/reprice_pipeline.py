@@ -109,6 +109,12 @@ class RepricePipeline:
             prev_order=prev_order,
         )
 
+    @staticmethod
+    def _inventory_override_active(strategy, side, market_ctx: RepriceMarketContext) -> bool:
+        reduces_inventory = not strategy._increases_inventory(side)
+        inventory_elevated = market_ctx.inventory_band in {"WARN", "CRITICAL", "HARD"}
+        return reduces_inventory and inventory_elevated
+
     async def evaluate_blocking_conditions(
         self,
         strategy,
@@ -124,26 +130,39 @@ class RepricePipeline:
             strategy._record_reprice_decision(side=side, level=level, reason="skip_pof_cooldown")
             return False
 
+        inventory_override = self._inventory_override_active(strategy, side, market_ctx)
         if strategy._is_strong_counter_trend_side(level_ctx.side_name, market_ctx.trend):
+            if not inventory_override:
+                strategy._record_reprice_decision(
+                    side=side,
+                    level=level,
+                    reason="skip_trend_counter_strong",
+                    regime=market_ctx.regime.regime,
+                    trend_direction=market_ctx.trend.direction,
+                    trend_strength=market_ctx.trend.strength,
+                    inventory_band=market_ctx.inventory_band,
+                    funding_bias_bps=market_ctx.funding_bias_bps,
+                )
+                if level_ctx.prev_ext_id is not None and strategy._settings.trend_cancel_counter_on_strong:
+                    await strategy._cancel_level_order(
+                        key=level_ctx.key,
+                        external_id=level_ctx.prev_ext_id,
+                        side=side,
+                        level=level,
+                        reason="trend_counter_strong",
+                    )
+                return False
+
             strategy._record_reprice_decision(
                 side=side,
                 level=level,
-                reason="skip_trend_counter_strong",
+                reason="allow_trend_counter_inventory_override",
                 regime=market_ctx.regime.regime,
                 trend_direction=market_ctx.trend.direction,
                 trend_strength=market_ctx.trend.strength,
                 inventory_band=market_ctx.inventory_band,
                 funding_bias_bps=market_ctx.funding_bias_bps,
             )
-            if level_ctx.prev_ext_id is not None and strategy._settings.trend_cancel_counter_on_strong:
-                await strategy._cancel_level_order(
-                    key=level_ctx.key,
-                    external_id=level_ctx.prev_ext_id,
-                    side=side,
-                    level=level,
-                    reason="trend_counter_strong",
-                )
-            return False
 
         if market_ctx.min_reprice_interval_s > 0:
             last_reprice = strategy._level_last_reprice_at.get(level_ctx.key, 0.0)
@@ -205,13 +224,26 @@ class RepricePipeline:
 
         spread_bps = strategy._ob.spread_bps()
         imbalance = strategy._ob.orderbook_imbalance(strategy._settings.imbalance_window_s)
+        inventory_override = self._inventory_override_active(strategy, side, market_ctx)
         guard: GuardDecision = strategy._guards.check(
             side=level_ctx.side_name,
             level=level,
             spread_bps=spread_bps,
             imbalance=imbalance,
             regime=market_ctx.regime,
+            inventory_override=inventory_override,
         )
+        if guard.allow and guard.reason != "allow":
+            strategy._record_reprice_decision(
+                side=side,
+                level=level,
+                reason=guard.reason,
+                **self._decision_fields(
+                    market_ctx=market_ctx,
+                    spread_bps=spread_bps,
+                    extra_offset_bps=guard.extra_offset_bps,
+                ),
+            )
         if not guard.allow:
             strategy._record_reprice_decision(
                 side=side,
@@ -344,13 +376,28 @@ class RepricePipeline:
             and counter_side is not None
             and level_ctx.side_name == counter_side
         ):
-            if market_ctx.trend.strength >= strategy._settings.trend_strong_threshold and level == 0:
-                requested_size = Decimal("0")
-            else:
-                cut = strategy._settings.trend_counter_side_size_cut * market_ctx.trend.strength
-                requested_size = strategy._quantize_size(
-                    requested_size * max(Decimal("0"), Decimal("1") - cut)
+            inventory_override = self._inventory_override_active(strategy, side, market_ctx)
+            if inventory_override:
+                strategy._record_reprice_decision(
+                    side=side,
+                    level=level,
+                    reason="allow_trend_size_inventory_override",
+                    current_best=quote_inputs.current_best,
+                    target_price=target_price,
+                    **self._decision_fields(
+                        market_ctx=market_ctx,
+                        spread_bps=quote_inputs.spread_bps,
+                        extra_offset_bps=quote_inputs.extra_offset_bps,
+                    ),
                 )
+            else:
+                if market_ctx.trend.strength >= strategy._settings.trend_strong_threshold and level == 0:
+                    requested_size = Decimal("0")
+                else:
+                    cut = strategy._settings.trend_counter_side_size_cut * market_ctx.trend.strength
+                    requested_size = strategy._quantize_size(
+                        requested_size * max(Decimal("0"), Decimal("1") - cut)
+                    )
 
         reserved_same_side_qty, reserved_open_notional_usd = strategy._orders.reserved_exposure(
             side=side,
