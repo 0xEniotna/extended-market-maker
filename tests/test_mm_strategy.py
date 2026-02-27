@@ -138,6 +138,9 @@ class FakeRisk:
     def get_position_total_pnl(self):
         return self._total_pnl
 
+    def get_session_pnl(self):
+        return self._total_pnl
+
     def can_place_order(self, side, size):
         return True
 

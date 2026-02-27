@@ -649,3 +649,76 @@ class TestCombinedScenarios:
             reference_price=Decimal("100"),
         )
         assert allowed == Decimal("0")
+
+
+# ===================================================================
+# 6. Session P&L tracking (survives position close/reset)
+# ===================================================================
+
+PositionStatus = _positions_mod.PositionStatus
+PositionSide = _positions_mod.PositionSide
+
+
+class TestSessionPnL:
+
+    def test_session_pnl_starts_at_zero(self):
+        rm = _make_rm()
+        assert rm.get_session_pnl() == Decimal("0")
+
+    def test_session_pnl_reflects_current_position_pnl(self):
+        rm = _make_rm()
+        rm._update_position_pnl(realized=Decimal("10"), unrealized=Decimal("5"))
+        assert rm.get_session_pnl() == Decimal("15")
+
+    def test_session_pnl_accumulates_across_position_resets(self):
+        """Realized P&L must survive _reset_position_pnl (position close)."""
+        rm = _make_rm()
+        # Position 1: realized +25
+        rm._update_position_pnl(realized=Decimal("25"), unrealized=Decimal("0"))
+        rm._reset_position_pnl()
+        # After reset: session_realized = 25, position = 0
+        assert rm.get_session_pnl() == Decimal("25")
+
+        # Position 2: realized +10, unrealized +3
+        rm._update_position_pnl(realized=Decimal("10"), unrealized=Decimal("3"))
+        assert rm.get_session_pnl() == Decimal("38")  # 25 + 10 + 3
+
+        # Position 2 closes
+        rm._reset_position_pnl()
+        assert rm.get_session_pnl() == Decimal("35")  # 25 + 10
+
+    def test_session_pnl_accumulates_losses(self):
+        """Negative realized P&L accumulates correctly."""
+        rm = _make_rm()
+        # Position 1: loss of -15
+        rm._update_position_pnl(realized=Decimal("-15"), unrealized=Decimal("0"))
+        rm._reset_position_pnl()
+        assert rm.get_session_pnl() == Decimal("-15")
+
+        # Position 2: loss of -8
+        rm._update_position_pnl(realized=Decimal("-8"), unrealized=Decimal("0"))
+        rm._reset_position_pnl()
+        assert rm.get_session_pnl() == Decimal("-23")
+
+    def test_session_pnl_mixed_wins_and_losses(self):
+        """Multiple position lifecycles with mixed outcomes."""
+        rm = _make_rm()
+        # Win: +50
+        rm._update_position_pnl(realized=Decimal("50"), unrealized=Decimal("0"))
+        rm._reset_position_pnl()
+        # Loss: -30
+        rm._update_position_pnl(realized=Decimal("-30"), unrealized=Decimal("0"))
+        rm._reset_position_pnl()
+        # Current unrealized: -5
+        rm._update_position_pnl(realized=Decimal("0"), unrealized=Decimal("-5"))
+
+        # Session = 50 + (-30) + 0 + (-5) = 15
+        assert rm.get_session_pnl() == Decimal("15")
+
+    def test_position_total_pnl_still_resets(self):
+        """get_position_total_pnl must still zero on reset (backward compat)."""
+        rm = _make_rm()
+        rm._update_position_pnl(realized=Decimal("50"), unrealized=Decimal("10"))
+        assert rm.get_position_total_pnl() == Decimal("60")
+        rm._reset_position_pnl()
+        assert rm.get_position_total_pnl() == Decimal("0")

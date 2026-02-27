@@ -781,7 +781,7 @@ class MarketMakerStrategy:
         self._level_imbalance_pause_until = self._guards._level_imbalance_pause_until
 
     def _evaluate_drawdown_stop(self) -> bool:
-        state = self._drawdown_stop.evaluate(self._risk.get_position_total_pnl())
+        state = self._drawdown_stop.evaluate(self._risk.get_session_pnl())
         if not state.triggered:
             return False
 

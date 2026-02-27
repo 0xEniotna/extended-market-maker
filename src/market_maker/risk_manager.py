@@ -63,6 +63,8 @@ class RiskManager:
         self._cached_realized_pnl: Decimal = Decimal("0")
         self._cached_unrealized_pnl: Decimal = Decimal("0")
         self._cached_total_position_pnl: Decimal = Decimal("0")
+        # Cumulative session P&L: survives position close/reset cycles.
+        self._session_realized_pnl: Decimal = Decimal("0")
         self._cached_available_for_trade: Decimal | None = None
         self._cached_equity: Decimal | None = None
         self._cached_initial_margin: Decimal | None = None
@@ -234,6 +236,15 @@ class RiskManager:
     def get_position_total_pnl(self) -> Decimal:
         """Return last cached realised+unrealised PnL for this market position."""
         return self._cached_total_position_pnl
+
+    def get_session_pnl(self) -> Decimal:
+        """Return cumulative session P&L (survives position close/reset cycles).
+
+        This is the sum of all realized P&L accumulated across every position
+        lifecycle in this process, plus the current position's total
+        (realized + unrealized) P&L.
+        """
+        return self._session_realized_pnl + self._cached_total_position_pnl
 
     def get_available_for_trade(self) -> Decimal | None:
         """Return the last cached available-for-trade collateral."""
@@ -530,6 +541,8 @@ class RiskManager:
         self._cached_total_position_pnl = realized_dec + unrealized_dec
 
     def _reset_position_pnl(self) -> None:
+        # Accumulate realized P&L into session total before zeroing.
+        self._session_realized_pnl += self._cached_realized_pnl
         self._cached_realized_pnl = Decimal("0")
         self._cached_unrealized_pnl = Decimal("0")
         self._cached_total_position_pnl = Decimal("0")
