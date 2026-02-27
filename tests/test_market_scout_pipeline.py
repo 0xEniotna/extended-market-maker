@@ -87,3 +87,113 @@ def test_build_launch_action_contract_has_required_fields(tmp_path: Path):
     assert action["market"] == "LIT-USD"
     assert isinstance(action["commands"], list)
     assert action["expected_evidence"]["cron_market"] == "LIT-USD"
+
+
+def test_extract_config_snapshot_includes_allowlisted_and_toxicity_keys(tmp_path: Path):
+    mod = _load_module(Path("scripts/tools/market_scout_pipeline.py"), "market_scout_pipeline_mod3")
+
+    env = tmp_path / ".env.eth"
+    env.write_text(
+        "\n".join(
+            [
+                "MM_MARKET_NAME=ETH-USD",
+                "MM_SPREAD_MULTIPLIER=0.35",
+                "MM_REPRICE_TOLERANCE_PERCENT=0.80",
+                "MM_ORDER_SIZE_MULTIPLIER=36",
+                "MM_INVENTORY_SKEW_FACTOR=0.25",
+                "MM_IMBALANCE_PAUSE_THRESHOLD=0.75",
+                "MM_MAX_POSITION_NOTIONAL_USD=108000",
+                "MM_TOXICITY_MARKOUT_BPS=4.5",
+                "MM_TOXICITY_MIN_OBS=25",
+                "MM_API_KEY=secret_should_not_show",
+            ]
+        )
+        + "\n"
+    )
+
+    snapshot = mod._extract_config_snapshot(str(env))
+    assert snapshot["available"] is True
+    assert snapshot["error"] is None
+    assert snapshot["env_hash"] is not None
+    values = snapshot["values"]
+    assert values["MM_SPREAD_MULTIPLIER"] == "0.35"
+    assert values["MM_REPRICE_TOLERANCE_PERCENT"] == "0.80"
+    assert values["MM_ORDER_SIZE_MULTIPLIER"] == "36"
+    assert values["MM_INVENTORY_SKEW_FACTOR"] == "0.25"
+    assert values["MM_IMBALANCE_PAUSE_THRESHOLD"] == "0.75"
+    assert values["MM_MAX_POSITION_NOTIONAL_USD"] == "108000"
+    assert values["MM_TOXICITY_MARKOUT_BPS"] == "4.5"
+    assert values["MM_TOXICITY_MIN_OBS"] == "25"
+    assert "MM_API_KEY" not in values
+
+
+def test_extract_config_snapshot_supports_alias_keys(tmp_path: Path):
+    mod = _load_module(Path("scripts/tools/market_scout_pipeline.py"), "market_scout_pipeline_mod4")
+
+    env = tmp_path / ".env.alt"
+    env.write_text(
+        "\n".join(
+            [
+                "SPREAD_PERCENT=1.1",
+                "REPRICE_TOLERANCE_PERCENT=0.5",
+                "ORDER_SIZE_MULTIPLIER=1.3",
+                "INVENTORY_SKEW_FACTOR=0.4",
+                "IMBALANCE_PAUSE_THRESHOLD=0.8",
+                "MM_MAX_NOTIONAL=50000",
+            ]
+        )
+        + "\n"
+    )
+
+    snapshot = mod._extract_config_snapshot(str(env))
+    values = snapshot["values"]
+    source_keys = snapshot["source_keys"]
+    assert values["MM_SPREAD_MULTIPLIER"] == "1.1"
+    assert values["MM_REPRICE_TOLERANCE_PERCENT"] == "0.5"
+    assert values["MM_ORDER_SIZE_MULTIPLIER"] == "1.3"
+    assert values["MM_INVENTORY_SKEW_FACTOR"] == "0.4"
+    assert values["MM_IMBALANCE_PAUSE_THRESHOLD"] == "0.8"
+    assert values["MM_MAX_ORDER_NOTIONAL_USD"] == "50000"
+    assert source_keys["MM_SPREAD_MULTIPLIER"] == "SPREAD_PERCENT"
+    assert source_keys["MM_MAX_ORDER_NOTIONAL_USD"] == "MM_MAX_NOTIONAL"
+
+
+def test_render_markdown_includes_active_config_snapshot_section():
+    mod = _load_module(Path("scripts/tools/market_scout_pipeline.py"), "market_scout_pipeline_mod5")
+
+    report = {
+        "generated_at": "2026-02-26T10:00:00Z",
+        "data_quality": {"ok": True, "issues": [], "default_env": ".env.eth"},
+        "rate_limits": {
+            "proposed_launches_last24h": 0,
+            "max_new_per_day": 2,
+            "max_new_per_run": 1,
+            "launch_slots_this_run": 1,
+        },
+        "active_markets": [
+            {
+                "market": "ETH-USD",
+                "underperformance_streak": 0,
+                "pnl_24h_usd": "12.5",
+                "markout_5s_bps": "-1.1",
+                "fill_rate_pct": "32",
+                "config_snapshot": {
+                    "values": {
+                        "MM_SPREAD_MULTIPLIER": "0.35",
+                        "MM_REPRICE_TOLERANCE_PERCENT": "0.8",
+                        "MM_ORDER_SIZE_MULTIPLIER": "36",
+                        "MM_INVENTORY_SKEW_FACTOR": "0.25",
+                        "MM_IMBALANCE_PAUSE_THRESHOLD": "0.75",
+                        "MM_MAX_POSITION_NOTIONAL_USD": "108000",
+                        "MM_TOXICITY_MARKOUT_BPS": "4.5",
+                    }
+                },
+            }
+        ],
+        "candidate_markets": [],
+    }
+    md = mod._render_markdown(report, [])
+    assert "## Active Config Snapshot" in md
+    assert "ETH-USD" in md
+    assert "0.35" in md
+    assert "MM_TOXICITY_MARKOUT_BPS" in md

@@ -63,7 +63,9 @@ PYTHONPATH=src python scripts/run_market_maker.py
 ## Main Scripts
 
 - `scripts/analyse_mm_journal.py`: summarize one run or the latest journal in a directory.
+- `mmctl apply-proposal|rollback|diff-proposal`: deterministic config proposal control plane (see `docs/config_proposals.md`).
 - `scripts/mm_advisor_loop.py`: advisor-only config proposal loop (never mutates env, never restarts bots).
+- `scripts/mm_advisor_apply.py`: approval-gated proposal apply tool (writes `.env`, apply receipts, changelog apply rows).
 - `scripts/mm_openclaw_controller.sh`: single-instance long-running advisor controller (per env).
 - `scripts/mm_openclaw_fleet.sh`: run multiple advisor controllers (one per `.env.*` instance).
 - `scripts/screen_mm_markets.py`: spread/tick/volume suitability screening.
@@ -96,6 +98,22 @@ Apply authority:
 - Dead-man proposals (`deadman=true` + `guardrail_status=passed`) are escalated to Warren auto-apply.
 - All other proposals are routed for human review.
 
+Apply examples:
+
+```bash
+# Human apply for one approved proposal
+.venv/bin/python scripts/mm_advisor_apply.py \
+  --proposal-id <proposal_id> \
+  --approve \
+  --json
+
+# Warren auto-apply pass (deadman-only proposals)
+.venv/bin/python scripts/mm_advisor_apply.py \
+  --mode warren-auto \
+  --approve \
+  --json
+```
+
 ## Scout + Auditor Workflow
 
 Deterministic scout + auditor scripts (Discord-first, recommend-only):
@@ -108,6 +126,10 @@ cd /path/to/repo
 .venv/bin/python scripts/tools/auditor_followup.py --print-target auditor
 .venv/bin/python scripts/tools/auditor_followup.py --print-target mm
 ```
+
+Note on analyst file access:
+- If your analyst agent is `messaging`-only (no filesystem tools), it should read config context from scout artifacts, not from direct `.env.*` reads.
+- `market_scout_report.json` now includes `active_markets[].config_snapshot` with allowlisted MM tuning keys and `MM_TOXICITY_*` keys.
 
 Primary artifacts:
 - `data/mm_audit/scout/market_scout_report.json`

@@ -38,6 +38,9 @@ dev = [
   "mypy>=1.0.0",
 ]
 
+[project.scripts]
+mmctl = "market_maker.mmctl:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

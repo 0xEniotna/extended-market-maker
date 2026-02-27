@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -33,6 +34,17 @@ from mm_audit_common import (  # noqa: E402
     update_env_lines,
     write_json,
 )
+
+CONFIG_SNAPSHOT_KEYS: List[Tuple[str, Tuple[str, ...]]] = [
+    ("MM_SPREAD_MULTIPLIER", ("MM_SPREAD_MULTIPLIER", "MM_SPREAD_PERCENT", "SPREAD_MULTIPLIER", "SPREAD_PERCENT")),
+    ("MM_REPRICE_TOLERANCE_PERCENT", ("MM_REPRICE_TOLERANCE_PERCENT", "REPRICE_TOLERANCE_PERCENT")),
+    ("MM_ORDER_SIZE_MULTIPLIER", ("MM_ORDER_SIZE_MULTIPLIER", "ORDER_SIZE_MULTIPLIER")),
+    ("MM_INVENTORY_SKEW_FACTOR", ("MM_INVENTORY_SKEW_FACTOR", "INVENTORY_SKEW_FACTOR")),
+    ("MM_IMBALANCE_PAUSE_THRESHOLD", ("MM_IMBALANCE_PAUSE_THRESHOLD", "IMBALANCE_PAUSE_THRESHOLD")),
+    ("MM_MAX_POSITION_SIZE", ("MM_MAX_POSITION_SIZE", "MM_MAX_POSITION")),
+    ("MM_MAX_ORDER_NOTIONAL_USD", ("MM_MAX_ORDER_NOTIONAL_USD", "MM_MAX_ORDER_NOTIONAL", "MM_MAX_NOTIONAL")),
+    ("MM_MAX_POSITION_NOTIONAL_USD", ("MM_MAX_POSITION_NOTIONAL_USD", "MM_MAX_POSITION_NOTIONAL", "MM_MAX_NOTIONAL")),
+]
 
 
 def _d(value: Any, default: str = "0") -> Decimal:
@@ -156,6 +168,64 @@ def _build_subprocess_env(default_env_path: Optional[Path]) -> Dict[str, str]:
     env.update({k: v for k, v in overrides.items() if isinstance(k, str)})
     env["ENV"] = str(default_env_path)
     return env
+
+
+def _extract_config_snapshot(env_path: Optional[str]) -> Dict[str, Any]:
+    snapshot: Dict[str, Any] = {
+        "available": False,
+        "env_path": env_path,
+        "env_hash": None,
+        "values": {},
+        "source_keys": {},
+        "error": None,
+    }
+    if not env_path:
+        snapshot["error"] = "env_path_missing"
+        return snapshot
+
+    env_file = Path(env_path).expanduser()
+    if not env_file.exists() or not env_file.is_file():
+        snapshot["error"] = "env_path_not_found"
+        return snapshot
+
+    try:
+        raw_text = env_file.read_text()
+        env_map = parse_env(raw_text.splitlines())
+    except Exception as exc:  # pragma: no cover - best effort resilience
+        snapshot["error"] = f"env_read_failed:{type(exc).__name__}"
+        return snapshot
+
+    values: Dict[str, str] = {}
+    source_keys: Dict[str, str] = {}
+    for canonical_key, aliases in CONFIG_SNAPSHOT_KEYS:
+        for alias in aliases:
+            raw = env_map.get(alias)
+            value = str(raw).strip() if raw is not None else ""
+            if not value:
+                continue
+            values[canonical_key] = value
+            source_keys[canonical_key] = alias
+            break
+
+    for key in sorted(env_map):
+        if not key.startswith("MM_TOXICITY_"):
+            continue
+        value = str(env_map.get(key) or "").strip()
+        if not value:
+            continue
+        values[key] = value
+        source_keys[key] = key
+
+    snapshot.update(
+        {
+            "available": True,
+            "env_path": str(env_file.resolve()),
+            "env_hash": hashlib.sha256(raw_text.encode("utf-8")).hexdigest()[:16],
+            "values": values,
+            "source_keys": source_keys,
+        }
+    )
+    return snapshot
 
 
 def _run_analysis_json(
@@ -519,6 +589,35 @@ def _render_markdown(report: Dict[str, Any], actions: List[Dict[str, Any]]) -> s
             )
     lines.append("")
 
+    lines.append("## Active Config Snapshot")
+    if not active:
+        lines.append("- none")
+    else:
+        lines.append("| Market | Spread | Reprice Tol | Order Size | Inv Skew | Imbalance Pause | Max Pos Notional | Toxicity Keys |")
+        lines.append("|---|---:|---:|---:|---:|---:|---:|---|")
+        for row in active:
+            snap = row.get("config_snapshot")
+            values: Dict[str, Any] = {}
+            if isinstance(snap, dict):
+                maybe_values = snap.get("values")
+                if isinstance(maybe_values, dict):
+                    values = maybe_values
+
+            toxicity_keys = ", ".join(sorted(k for k in values if k.startswith("MM_TOXICITY_"))) or "-"
+            lines.append(
+                "| {market} | {spread} | {reprice} | {order_sz} | {skew} | {pause} | {max_pos} | {tox} |".format(
+                    market=row.get("market"),
+                    spread=values.get("MM_SPREAD_MULTIPLIER", "n/a"),
+                    reprice=values.get("MM_REPRICE_TOLERANCE_PERCENT", "n/a"),
+                    order_sz=values.get("MM_ORDER_SIZE_MULTIPLIER", "n/a"),
+                    skew=values.get("MM_INVENTORY_SKEW_FACTOR", "n/a"),
+                    pause=values.get("MM_IMBALANCE_PAUSE_THRESHOLD", "n/a"),
+                    max_pos=values.get("MM_MAX_POSITION_NOTIONAL_USD", "n/a"),
+                    tox=toxicity_keys,
+                )
+            )
+    lines.append("")
+
     lines.append("## Top Candidates")
     candidates = report.get("candidate_markets", [])[:12]
     if not candidates:
@@ -771,6 +870,7 @@ def main() -> int:
             "job_name": job.get("job_name"),
             "market": market,
             "env_path": env_path,
+            "config_snapshot": _extract_config_snapshot(env_path),
             "latest_journal": str(latest_journal) if latest_journal else None,
             "score": screen_scores.get(market),
             "pnl_24h_usd": pnl_24h,
