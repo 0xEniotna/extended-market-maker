@@ -736,6 +736,11 @@ class OrderManager:
         """Force-remove orders stuck in pending_cancel beyond *timeout_s*.
 
         Returns the number of orders force-removed.
+
+        Fires ``_level_freed_callbacks`` for each removed order so that the
+        strategy's cancel-barrier tracking (``_level_cancel_pending_ext_id``)
+        is correctly cleared.  Without this, level slots become permanently
+        blocked when the WebSocket terminal event is missed.
         """
         now = time.monotonic()
         removed = 0
@@ -755,6 +760,21 @@ class OrderManager:
                     info.exchange_order_id,
                     info.level,
                 )
+                # Fire level-freed callbacks so the strategy clears its
+                # cancel-barrier state (_level_cancel_pending_ext_id).
+                for cb in self._level_freed_callbacks:
+                    try:
+                        cb(
+                            str(info.side),
+                            info.level,
+                            info.external_id,
+                            rejected=False,
+                            status="CANCELLED",
+                            reason="sweep_pending_cancel_timeout",
+                            price=info.price,
+                        )
+                    except Exception as exc:
+                        logger.error("level_freed callback error during sweep: %s", exc)
                 removed += 1
         return removed
 

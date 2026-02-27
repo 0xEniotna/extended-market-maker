@@ -144,12 +144,31 @@ class MarketMakerStrategy:
         logger.info("Signal received, initiating shutdown")
         self._request_shutdown("shutdown")
 
+    # Keys that cannot be changed via SIGHUP because they are wired into
+    # components (WS streams, trading client, risk manager) at startup.
+    _RELOAD_IMMUTABLE_KEYS = frozenset({
+        "market_name", "environment", "vault_id", "api_key",
+        "stark_private_key", "stark_public_key",
+    })
+
     def _handle_reload(self) -> None:
         """SIGHUP handler — reload config from environment / .env file."""
         try:
             old_config = self._sanitized_run_config(self._settings)
             new_settings = MarketMakerSettings()
             new_config = self._sanitized_run_config(new_settings)
+
+            # Guard: reject reload if immutable keys changed.
+            for key in self._RELOAD_IMMUTABLE_KEYS:
+                old_val = getattr(self._settings, key, None)
+                new_val = getattr(new_settings, key, None)
+                if str(old_val) != str(new_val):
+                    logger.error(
+                        "SIGHUP reload REJECTED: immutable key '%s' changed "
+                        "(%s -> %s) — restart required to apply this change",
+                        key, old_val, new_val,
+                    )
+                    return
 
             # Compute diff: keys where values changed.
             diff: Dict[str, Any] = {}
