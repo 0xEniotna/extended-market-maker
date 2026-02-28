@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import time
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from typing import Dict, Optional
 
 from x10.perpetual.orders import OrderSide
@@ -43,6 +43,7 @@ class RiskManager:
         balance_notional_multiplier: Decimal = Decimal("1.0"),
         balance_min_available_usd: Decimal = Decimal("0"),
         balance_staleness_max_s: float = 30.0,
+        balance_stale_action: str = "reduce",
         orderbook_mgr=None,
     ) -> None:
         self._client = trading_client
@@ -58,6 +59,7 @@ class RiskManager:
         self._balance_notional_multiplier = max(Decimal("0"), balance_notional_multiplier)
         self._balance_min_available_usd = max(Decimal("0"), balance_min_available_usd)
         self._balance_staleness_max_s = max(0.0, float(balance_staleness_max_s))
+        self._balance_stale_action = balance_stale_action if balance_stale_action in ("skip", "reduce", "halt") else "reduce"
         self._orderbook_mgr = orderbook_mgr
         self._cached_position: Decimal = Decimal("0")
         self._cached_realized_pnl: Decimal = Decimal("0")
@@ -445,7 +447,19 @@ class RiskManager:
 
             # --- Balance-aware sizing (with staleness guard) ---
             balance_available = self._cached_available_for_trade
-            if self._is_balance_stale():
+            balance_stale = self._is_balance_stale()
+            if balance_stale and self._balance_aware_sizing_enabled:
+                if self._balance_stale_action == "halt":
+                    opening_qty = Decimal("0")
+                    clipped = reducing_qty + opening_qty
+                elif self._balance_stale_action == "reduce":
+                    opening_qty = (opening_qty / 2).quantize(
+                        Decimal("1"), rounding=ROUND_DOWN
+                    ) if opening_qty > 0 else opening_qty
+                    clipped = reducing_qty + opening_qty
+                # else: "skip" — leave opening_qty unchanged (prior default)
+                balance_available = None
+            elif balance_stale:
                 balance_available = None
 
             if (

@@ -61,6 +61,7 @@ def _make_rm(
     balance_notional_multiplier: Decimal = Decimal("1.0"),
     balance_min_available_usd: Decimal = Decimal("0"),
     balance_staleness_max_s: float = 30.0,
+    balance_stale_action: str = "reduce",
     orderbook_mgr=None,
 ) -> RiskManager:
     return RiskManager(
@@ -77,6 +78,7 @@ def _make_rm(
         balance_notional_multiplier=balance_notional_multiplier,
         balance_min_available_usd=balance_min_available_usd,
         balance_staleness_max_s=balance_staleness_max_s,
+        balance_stale_action=balance_stale_action,
         orderbook_mgr=orderbook_mgr,
     )
 
@@ -402,13 +404,14 @@ class TestOrderbookMidPrice:
 class TestBalanceStaleness:
 
     def test_stale_balance_skips_balance_sizing(self):
-        """When balance is stale, balance-aware sizing should be skipped."""
+        """When balance is stale with action='skip', balance-aware sizing should be skipped."""
         rm = _make_rm(
             balance_aware_sizing_enabled=True,
             balance_usage_factor=Decimal("1"),
             balance_notional_multiplier=Decimal("1"),
             balance_min_available_usd=Decimal("0"),
             balance_staleness_max_s=30.0,
+            balance_stale_action="skip",
         )
         # Set available_for_trade very low — would clip to 0 if used
         rm._cached_available_for_trade = Decimal("1")
@@ -451,6 +454,7 @@ class TestBalanceStaleness:
             balance_notional_multiplier=Decimal("1"),
             balance_min_available_usd=Decimal("0"),
             balance_staleness_max_s=30.0,
+            balance_stale_action="skip",
         )
         rm._cached_available_for_trade = Decimal("1")
         rm._cached_balance_updated_at = None  # never updated
@@ -460,7 +464,7 @@ class TestBalanceStaleness:
             requested_size=Decimal("10"),
             reference_price=Decimal("100"),
         )
-        # Stale => balance sizing skipped => full size allowed
+        # Stale + skip => balance sizing skipped => full size allowed
         assert allowed == Decimal("10")
 
     def test_staleness_disabled_when_zero(self):
@@ -500,6 +504,116 @@ class TestBalanceStaleness:
         assert rm._cached_balance_updated_at is not None
         assert before <= rm._cached_balance_updated_at <= after
         assert rm.get_available_for_trade() == Decimal("123.45")
+
+
+# ===================================================================
+# 5b. Stale balance action modes
+# ===================================================================
+
+class TestStaleBalanceAction:
+
+    def test_skip_leaves_size_unchanged(self):
+        """balance_stale_action='skip' bypasses balance sizing entirely."""
+        rm = _make_rm(
+            balance_aware_sizing_enabled=True,
+            balance_usage_factor=Decimal("1"),
+            balance_notional_multiplier=Decimal("1"),
+            balance_staleness_max_s=30.0,
+            balance_stale_action="skip",
+        )
+        rm._cached_available_for_trade = Decimal("1")
+        rm._cached_balance_updated_at = time.monotonic() - 60.0  # stale
+
+        allowed = rm.allowed_order_size(
+            side=OrderSide.BUY,
+            requested_size=Decimal("10"),
+            reference_price=Decimal("100"),
+        )
+        # Skip means balance sizing is skipped — full size allowed
+        assert allowed == Decimal("10")
+
+    def test_reduce_halves_opening_size(self):
+        """balance_stale_action='reduce' halves the opening order size."""
+        rm = _make_rm(
+            balance_aware_sizing_enabled=True,
+            balance_usage_factor=Decimal("1"),
+            balance_notional_multiplier=Decimal("1"),
+            balance_staleness_max_s=30.0,
+            balance_stale_action="reduce",
+        )
+        rm._cached_available_for_trade = Decimal("10000")
+        rm._cached_balance_updated_at = time.monotonic() - 60.0  # stale
+
+        allowed = rm.allowed_order_size(
+            side=OrderSide.BUY,
+            requested_size=Decimal("10"),
+            reference_price=Decimal("100"),
+        )
+        # Reduce: opening_qty halved from 10 to 5
+        assert allowed == Decimal("5")
+
+    def test_halt_zeroes_opening_size(self):
+        """balance_stale_action='halt' zeroes the opening order size."""
+        rm = _make_rm(
+            balance_aware_sizing_enabled=True,
+            balance_usage_factor=Decimal("1"),
+            balance_notional_multiplier=Decimal("1"),
+            balance_staleness_max_s=30.0,
+            balance_stale_action="halt",
+        )
+        rm._cached_available_for_trade = Decimal("10000")
+        rm._cached_balance_updated_at = time.monotonic() - 60.0  # stale
+
+        allowed = rm.allowed_order_size(
+            side=OrderSide.BUY,
+            requested_size=Decimal("10"),
+            reference_price=Decimal("100"),
+        )
+        assert allowed == Decimal("0")
+
+    def test_reduce_allows_reducing_orders(self):
+        """balance_stale_action='reduce' does not affect reducing orders."""
+        rm = _make_rm(
+            balance_aware_sizing_enabled=True,
+            balance_usage_factor=Decimal("1"),
+            balance_notional_multiplier=Decimal("1"),
+            balance_staleness_max_s=30.0,
+            balance_stale_action="reduce",
+        )
+        rm._cached_position = Decimal("-20")
+        rm._cached_available_for_trade = Decimal("10000")
+        rm._cached_balance_updated_at = time.monotonic() - 60.0  # stale
+
+        # Buying to reduce short position — fully reducing
+        allowed = rm.allowed_order_size(
+            side=OrderSide.BUY,
+            requested_size=Decimal("10"),
+            reference_price=Decimal("100"),
+        )
+        # All 10 are reducing, so not halved
+        assert allowed == Decimal("10")
+
+    def test_halt_allows_reducing_orders(self):
+        """balance_stale_action='halt' does not affect reducing orders."""
+        rm = _make_rm(
+            balance_aware_sizing_enabled=True,
+            balance_usage_factor=Decimal("1"),
+            balance_notional_multiplier=Decimal("1"),
+            balance_staleness_max_s=30.0,
+            balance_stale_action="halt",
+        )
+        rm._cached_position = Decimal("-20")
+        rm._cached_available_for_trade = Decimal("10000")
+        rm._cached_balance_updated_at = time.monotonic() - 60.0  # stale
+
+        # Buying to reduce short — fully reducing
+        allowed = rm.allowed_order_size(
+            side=OrderSide.BUY,
+            requested_size=Decimal("10"),
+            reference_price=Decimal("100"),
+        )
+        # All 10 are reducing, opening_qty=0 already — halt doesn't change it
+        assert allowed == Decimal("10")
 
 
 # ===================================================================

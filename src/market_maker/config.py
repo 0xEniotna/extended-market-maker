@@ -269,6 +269,15 @@ class MarketMakerSettings(BaseSettings):
             "0 disables staleness checking."
         ),
     )
+    balance_stale_action: Literal["skip", "reduce", "halt"] = Field(
+        default="reduce",
+        description=(
+            "Action when cached balance is stale. "
+            "'skip' bypasses balance-aware sizing entirely (fail-open, prior default). "
+            "'reduce' halves order size for opening orders. "
+            "'halt' zeroes order size until fresh balance arrives."
+        ),
+    )
     reprice_tolerance_percent: Decimal = Field(
         default=Decimal("0.1"),
         gt=0,
@@ -771,12 +780,12 @@ class MarketMakerSettings(BaseSettings):
         description="Enable exchange dead-man switch heartbeat.",
     )
     deadman_countdown_s: int = Field(
-        default=60,
+        default=30,
         ge=0,
         description="Dead-man switch countdown (seconds). 0 disables remote auto-cancel.",
     )
     deadman_heartbeat_s: float = Field(
-        default=20.0,
+        default=10.0,
         gt=0,
         description="Dead-man switch heartbeat interval in seconds.",
     )

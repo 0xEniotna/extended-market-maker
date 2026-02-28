@@ -202,6 +202,7 @@ def _build_runtime_context(
         balance_notional_multiplier=settings.balance_notional_multiplier,
         balance_min_available_usd=settings.balance_min_available_usd,
         balance_staleness_max_s=settings.balance_staleness_max_s,
+        balance_stale_action=settings.balance_stale_action,
         orderbook_mgr=ob_mgr,
     )
     account_stream = AccountStreamManager(

@@ -51,6 +51,21 @@ from .volatility_regime import VolatilityRegime
 
 logger = logging.getLogger(__name__)
 
+# Exception messages/types that indicate an irrecoverable error.
+# These should trigger a shutdown instead of endless 1-second retries.
+_FATAL_EXCEPTION_PATTERNS = frozenset({
+    "authentication",
+    "unauthorized",
+    "forbidden",
+    "api key",
+    "invalid key",
+    "permission denied",
+    "market not found",
+    "market delisted",
+    "account suspended",
+    "account disabled",
+})
+
 # Refresh the exchange position every N seconds as a safety net.
 # The account stream handles real-time updates; this is a fallback.
 _POSITION_REFRESH_INTERVAL_S = 30.0
@@ -337,6 +352,13 @@ class MarketMakerStrategy:
                     stack_trace_hash=TradeJournal.make_stack_trace_hash(exc),
                     stack_trace=TradeJournal.format_stack_trace(exc),
                 )
+                if self._is_fatal_exception(exc):
+                    logger.critical(
+                        "FATAL error in level task %s L%d — initiating shutdown: %s",
+                        side, level, exc,
+                    )
+                    self._shutdown_event.set()
+                    return
                 await asyncio.sleep(1.0)
 
     # ------------------------------------------------------------------
@@ -585,6 +607,20 @@ class MarketMakerStrategy:
         if "SELL" in side_upper:
             return "SELL"
         return side_value
+
+    @staticmethod
+    def _is_fatal_exception(exc: BaseException) -> bool:
+        """Return True if the exception indicates an irrecoverable error.
+
+        Irrecoverable errors (auth failures, revoked keys, delisted markets)
+        should trigger a shutdown rather than infinite 1-second retries.
+        """
+        msg = str(exc).lower()
+        exc_type = type(exc).__name__.lower()
+        for pattern in _FATAL_EXCEPTION_PATTERNS:
+            if pattern in msg or pattern in exc_type:
+                return True
+        return False
 
     def _increases_inventory(self, side: OrderSide) -> bool:
         side_name = self._normalise_side(str(side))
