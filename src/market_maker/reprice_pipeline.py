@@ -516,6 +516,10 @@ class RepricePipeline:
             best_ask=fresh_ask.price if fresh_ask else None,
             position=strategy._risk.get_current_position(),
         )
+        # Record quote event for quote-to-trade ratio tracking.
+        qtr = getattr(strategy, "_qtr", None)
+        if qtr is not None:
+            qtr.record_quote()
 
     def _resolve_market_context(
         self,

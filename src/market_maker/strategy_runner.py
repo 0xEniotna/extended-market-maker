@@ -407,6 +407,10 @@ def _create_tasks(ctx: RuntimeContext) -> list[asyncio.Task]:
     tasks.append(asyncio.create_task(ctx.strategy._funding_refresh_task(), name="mm-funding-refresh"))
     tasks.append(asyncio.create_task(ctx.strategy._drawdown_watchdog_task(), name="mm-drawdown-watchdog"))
     tasks.append(asyncio.create_task(ctx.strategy._kpi_watchdog_task(), name="mm-kpi-watchdog"))
+    tasks.append(asyncio.create_task(ctx.strategy._pnl_attribution_task(), name="mm-pnl-attribution"))
+    tasks.append(asyncio.create_task(ctx.strategy._qtr_monitor_task(), name="mm-qtr-monitor"))
+    tasks.append(asyncio.create_task(ctx.strategy._latency_sla_task(), name="mm-latency-sla"))
+    tasks.append(asyncio.create_task(ctx.strategy._config_rollback_task(), name="mm-config-rollback"))
     tasks.append(asyncio.create_task(_heartbeat_task(ctx), name="mm-heartbeat"))
     if ctx.settings.deadman_enabled:
         tasks.append(asyncio.create_task(_deadman_heartbeat_task(ctx), name="mm-deadman"))

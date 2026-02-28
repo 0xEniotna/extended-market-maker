@@ -32,15 +32,19 @@ from x10.perpetual.trading_client import PerpetualTradingClient
 
 from .account_stream import AccountStreamManager, FillEvent
 from .config import ENV_FILE, MarketMakerSettings
+from .config_rollback import ConfigRollbackWatchdog, PerformanceBaseline
 from .decision_models import RegimeState, RepriceMarketContext, TrendState
 from .drawdown_stop import DrawdownStop
 from .fill_quality import FillQualityTracker
 from .guard_policy import GuardPolicy
+from .latency_monitor import LatencyMonitor
 from .metrics import MetricsCollector
 from .order_manager import OrderManager
 from .orderbook_manager import OrderbookManager
+from .pnl_attribution import PnLAttributionTracker
 from .post_only_safety import PostOnlySafety
 from .pricing_engine import PricingEngine
+from .quote_trade_ratio import QuoteTradeRatioTracker
 from .reprice_pipeline import RepricePipeline
 from .risk_manager import RiskManager
 from .strategy_callbacks import on_fill, on_level_freed
@@ -74,6 +78,10 @@ _BALANCE_REFRESH_INTERVAL_S = 10.0
 _DRAWDOWN_CHECK_INTERVAL_S = 1.0
 _MARGIN_GUARD_CHECK_INTERVAL_S = 1.0
 _KPI_WATCHDOG_INTERVAL_S = 5.0
+_QTR_EVALUATE_INTERVAL_S = 30.0
+_LATENCY_SLA_INTERVAL_S = 10.0
+_CONFIG_ROLLBACK_INTERVAL_S = 60.0
+_PNL_ATTRIBUTION_LOG_INTERVAL_S = 60.0
 
 # Default circuit-breaker settings
 _CIRCUIT_BREAKER_MAX_FAILURES = 5
@@ -204,6 +212,23 @@ class MarketMakerStrategy:
                     after=new_config,
                     diff=diff,
                 )
+
+            # Notify config rollback watchdog.
+            if diff and hasattr(self, "_config_rollback"):
+                fq = getattr(self, "_fill_quality", None)
+                avg_markout_1s = Decimal("0")
+                if fq is not None:
+                    summary = fq.segmented_markout_summary("1s")
+                    avg_markout_1s = summary.avg_all
+                pnl_snap = self._pnl_attribution.snapshot()
+                baseline = PerformanceBaseline(
+                    captured_at=time.monotonic(),
+                    avg_markout_1s_bps=avg_markout_1s,
+                    fill_count=pnl_snap.fill_count,
+                    session_pnl_usd=self._risk.get_session_pnl(),
+                    avg_spread_capture_bps=pnl_snap.avg_spread_capture_bps,
+                )
+                self._config_rollback.on_config_change(old_config, new_config, baseline)
 
             logger.info(
                 "Config reloaded: offset_mode=%s skew=%.2f spread_min=%s levels=%d max_age=%ss diff_keys=%s",
@@ -809,6 +834,24 @@ class MarketMakerStrategy:
         self._metrics.set_quote_halt_state(self._quote_halt_reasons)
         self._metrics.set_margin_guard_breached(self._margin_breach_since is not None)
 
+        # --- Phase 4 institutional features ---
+        # P&L attribution tracker (persists across rebuilds).
+        if not hasattr(self, "_pnl_attribution"):
+            self._pnl_attribution = PnLAttributionTracker()
+        # Quote-to-trade ratio monitor.
+        self._qtr = QuoteTradeRatioTracker(
+            warn_threshold=50.0,
+            critical_threshold=100.0,
+        )
+        # Venue latency SLA monitor.
+        self._latency_monitor = LatencyMonitor(
+            warn_ms=200.0,
+            critical_ms=1000.0,
+        )
+        # Config rollback watchdog (persists across rebuilds).
+        if not hasattr(self, "_config_rollback"):
+            self._config_rollback = ConfigRollbackWatchdog()
+
         # Keep legacy attribute names as aliases for one release cycle.
         self._level_pof_until = self._post_only.pof_until
         self._level_pof_streak = self._post_only.pof_streak
@@ -1028,6 +1071,126 @@ class MarketMakerStrategy:
             except Exception as exc:
                 logger.error("KPI watchdog task error: %s", exc, exc_info=True)
             await asyncio.sleep(_KPI_WATCHDOG_INTERVAL_S)
+
+    # ------------------------------------------------------------------
+    # Phase 4: Institutional monitoring tasks
+    # ------------------------------------------------------------------
+
+    async def _pnl_attribution_task(self) -> None:
+        """Periodically log P&L attribution breakdown to the journal."""
+        while not self._shutdown_event.is_set():
+            try:
+                bid = self._ob.best_bid()
+                ask = self._ob.best_ask()
+                mid = None
+                if bid is not None and ask is not None and bid.price > 0:
+                    mid = (bid.price + ask.price) / 2
+                snap = self._pnl_attribution.snapshot(current_mid=mid)
+                if snap.fill_count > 0:
+                    self._journal.record_exchange_event(
+                        event_type="pnl_attribution",
+                        details={
+                            "spread_capture_usd": str(snap.spread_capture_usd),
+                            "inventory_pnl_usd": str(snap.inventory_pnl_usd),
+                            "fee_pnl_usd": str(snap.fee_pnl_usd),
+                            "funding_pnl_usd": str(snap.funding_pnl_usd),
+                            "total_usd": str(snap.total_usd),
+                            "fill_count": snap.fill_count,
+                            "buy_fills": snap.buy_fill_count,
+                            "sell_fills": snap.sell_fill_count,
+                            "maker_fills": snap.maker_fill_count,
+                            "taker_fills": snap.taker_fill_count,
+                            "avg_spread_capture_bps": str(snap.avg_spread_capture_bps),
+                            "total_volume_usd": str(snap.total_volume_usd),
+                        },
+                    )
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                logger.error("P&L attribution task error: %s", exc)
+            await asyncio.sleep(_PNL_ATTRIBUTION_LOG_INTERVAL_S)
+
+    async def _qtr_monitor_task(self) -> None:
+        """Periodically evaluate quote-to-trade ratio."""
+        while not self._shutdown_event.is_set():
+            try:
+                snap = self._qtr.evaluate()
+                if snap.quotes_in_window > 0:
+                    self._journal.record_exchange_event(
+                        event_type="qtr_snapshot",
+                        details={
+                            "quotes": snap.quotes_in_window,
+                            "fills": snap.fills_in_window,
+                            "ratio": str(snap.ratio),
+                            "warn": snap.warn_active,
+                            "critical": snap.critical_active,
+                        },
+                    )
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                logger.error("QTR monitor task error: %s", exc)
+            await asyncio.sleep(_QTR_EVALUATE_INTERVAL_S)
+
+    async def _latency_sla_task(self) -> None:
+        """Periodically evaluate venue latency SLA and adjust quoting."""
+        while not self._shutdown_event.is_set():
+            try:
+                # Feed latency samples from order manager into monitor.
+                for sample in getattr(self._orders, "_latency_samples", []):
+                    self._latency_monitor.record_latency(sample)
+
+                snap = self._latency_monitor.evaluate()
+                if snap.halt_quoting:
+                    self._set_quote_halt("latency_sla")
+                else:
+                    self._clear_quote_halt("latency_sla")
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                logger.error("Latency SLA task error: %s", exc)
+            await asyncio.sleep(_LATENCY_SLA_INTERVAL_S)
+
+    async def _config_rollback_task(self) -> None:
+        """Periodically evaluate whether a recent config change degraded performance."""
+        while not self._shutdown_event.is_set():
+            try:
+                if self._config_rollback.has_pending_evaluation:
+                    # Gather current metrics for evaluation.
+                    fq = getattr(self, "_fill_quality", None)
+                    avg_markout_1s = Decimal("0")
+                    if fq is not None:
+                        summary = fq.segmented_markout_summary("1s")
+                        avg_markout_1s = summary.avg_all
+
+                    pnl_snap = self._pnl_attribution.snapshot()
+                    decision = self._config_rollback.evaluate(
+                        avg_markout_1s_bps=avg_markout_1s,
+                        fill_count=pnl_snap.fill_count,
+                        session_pnl_usd=self._risk.get_session_pnl(),
+                        avg_spread_capture_bps=pnl_snap.avg_spread_capture_bps,
+                    )
+                    if decision.should_rollback:
+                        good_config = self._config_rollback.last_known_good_config
+                        self._journal.record_exchange_event(
+                            event_type="config_rollback",
+                            details={
+                                "reason": decision.reason,
+                                "degraded_metrics": {
+                                    k: str(v) for k, v in decision.degraded_metrics.items()
+                                },
+                            },
+                        )
+                        logger.warning(
+                            "Config rollback triggered: %s (good config available: %s)",
+                            decision.reason,
+                            good_config is not None,
+                        )
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                logger.error("Config rollback task error: %s", exc)
+            await asyncio.sleep(_CONFIG_ROLLBACK_INTERVAL_S)
 
     def _order_age_exceeded(
         self,
