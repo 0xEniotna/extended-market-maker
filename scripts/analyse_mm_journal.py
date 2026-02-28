@@ -15,7 +15,7 @@ import argparse
 import bisect
 import json
 import sys
-from collections import Counter, defaultdict
+from collections import Counter
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -179,31 +179,44 @@ def _fill_context_value(fill, key):
 
 
 def _bucket_spread(v):
-    if v is None: return None
-    if v < Decimal("2"): return "<2"
-    if v < Decimal("5"): return "2-5"
-    if v < Decimal("10"): return "5-10"
+    if v is None:
+        return None
+    if v < Decimal("2"):
+        return "<2"
+    if v < Decimal("5"):
+        return "2-5"
+    if v < Decimal("10"):
+        return "5-10"
     return ">10"
 
 
 def _bucket_micro_vol(v):
-    if v is None: return None
-    if v < Decimal("2"): return "<2"
-    if v < Decimal("5"): return "2-5"
+    if v is None:
+        return None
+    if v < Decimal("2"):
+        return "<2"
+    if v < Decimal("5"):
+        return "2-5"
     return ">5"
 
 
 def _bucket_drift(v):
-    if v is None: return None
-    if v < Decimal("-1"): return "negative"
-    if v > Decimal("1"): return "positive"
+    if v is None:
+        return None
+    if v < Decimal("-1"):
+        return "negative"
+    if v > Decimal("1"):
+        return "positive"
     return "neutral"
 
 
 def _bucket_imbalance(v):
-    if v is None: return None
-    if v < Decimal("-0.30"): return "ask-heavy"
-    if v > Decimal("0.30"): return "bid-heavy"
+    if v is None:
+        return None
+    if v < Decimal("-0.30"):
+        return "ask-heavy"
+    if v > Decimal("0.30"):
+        return "bid-heavy"
     return "balanced"
 
 
@@ -220,9 +233,12 @@ def _avg(values):
 
 
 def _to_jsonable(v):
-    if isinstance(v, Decimal): return str(v)
-    if isinstance(v, dict): return {k: _to_jsonable(val) for k, val in v.items()}
-    if isinstance(v, list): return [_to_jsonable(x) for x in v]
+    if isinstance(v, Decimal):
+        return str(v)
+    if isinstance(v, dict):
+        return {k: _to_jsonable(val) for k, val in v.items()}
+    if isinstance(v, list):
+        return [_to_jsonable(x) for x in v]
     return v
 
 

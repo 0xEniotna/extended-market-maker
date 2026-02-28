@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -28,7 +28,6 @@ from audit_report_common import (  # noqa: E402
     truncate_markdown,
 )
 from mm_audit_common import write_json  # noqa: E402
-
 
 UPTIME_REASONS = {"replace_target_shift", "replace_max_age"}
 RECOMMENDATION_HINTS = {

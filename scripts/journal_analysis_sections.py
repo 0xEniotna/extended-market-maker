@@ -9,22 +9,22 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from analyse_mm_journal import (
-    _d,
-    _format_avg,
-    _horizon_label,
-    _markout_for_fill,
     _MARKOUT_HORIZONS,
-    _ts_fmt,
-    _latest_position,
-    _first_position,
-    _fill_context_value,
-    _bucket_spread,
-    _bucket_micro_vol,
     _bucket_drift,
     _bucket_imbalance,
+    _bucket_micro_vol,
+    _bucket_spread,
+    _d,
+    _fill_context_value,
+    _first_position,
+    _format_avg,
+    _horizon_label,
+    _latest_position,
+    _markout_for_fill,
+    _ts_fmt,
 )
 
 

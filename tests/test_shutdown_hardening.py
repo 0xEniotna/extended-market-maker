@@ -56,14 +56,14 @@ _positions_mod.PositionModel = object
 _positions_mod.PositionSide = SimpleNamespace(SHORT="SHORT", LONG="LONG")
 _positions_mod.PositionStatus = SimpleNamespace(CLOSED="CLOSED", OPENED="OPENED")
 
-from market_maker import shutdown_manager, strategy_runner  # noqa: E402
+from market_maker import shutdown_manager  # noqa: E402, I001
 from market_maker.order_manager import FlattenResult, OrderManager  # noqa: E402
 from market_maker.shutdown_manager import (  # noqa: E402
+    _write_json_state,
+    _write_pre_shutdown_state,
     attempt_shutdown_flatten as _attempt_shutdown_flatten,
     compute_progressive_slippage as _compute_progressive_slippage,
     shutdown_core as _shutdown_core,
-    _write_json_state,
-    _write_pre_shutdown_state,
 )
 from market_maker.strategy_runner import RuntimeContext  # noqa: E402
 

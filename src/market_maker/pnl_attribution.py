@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import Decimal
-from typing import Dict, Optional
+from typing import Optional
 
 # Max fill records to keep for attribution (rolling window).
 _MAX_FILL_RECORDS = 5000
@@ -144,10 +144,6 @@ class PnLAttributionTracker:
             self._net_position += signed_qty
         else:
             # Reducing position: realize P&L against cost basis
-            if abs(old_position) > 0:
-                avg_entry = abs(self._position_cost_basis / old_position)
-            else:
-                avg_entry = price
             reduce_qty = min(qty, abs(old_position))
 
             # Reduce cost basis proportionally

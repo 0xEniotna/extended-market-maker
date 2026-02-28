@@ -18,37 +18,47 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from x10.perpetual.orders import (
     OpenOrderModel,
     OrderSide,
     OrderStatus,
-    OrderType,
-    TimeInForce,
 )
 from x10.perpetual.trading_client import PerpetualTradingClient
 
 from .fee_resolver import FeeResolver
 from .order_lifecycle import (
     cancel_all_orders as _cancel_all,
+)
+from .order_lifecycle import (
     cancel_order as _cancel_one,
+)
+from .order_lifecycle import (
     place_order as _place,
+)
+from .order_lifecycle import (
     sweep_pending_cancels as _sweep,
 )
 from .order_rate_state import OrderRateState
 from .order_tracking import (
     FailureTracker,
     LatencyTracker,
+)
+from .order_tracking import (
     find_zombie_orders as _find_zombies,
+)
+from .order_tracking import (
     reserved_exposure as _reserved_exposure,
 )
 from .position_flattener import (
     FlattenResult,
     extract_exchange_id,
-    flatten_position as _do_flatten,
     round_down_to_step,
     round_to_tick_for_side,
+)
+from .position_flattener import (
+    flatten_position as _do_flatten,
 )
 
 logger = logging.getLogger(__name__)

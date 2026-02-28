@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any
 
 from .decision_models import RepriceMarketContext
 from .types import StrategyContext

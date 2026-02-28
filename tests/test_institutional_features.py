@@ -4,13 +4,10 @@ from __future__ import annotations
 import time
 from decimal import Decimal
 
-import pytest
-
+from market_maker.config_rollback import ConfigRollbackWatchdog, PerformanceBaseline
+from market_maker.latency_monitor import LatencyMonitor
 from market_maker.pnl_attribution import PnLAttributionTracker
 from market_maker.quote_trade_ratio import QuoteTradeRatioTracker
-from market_maker.latency_monitor import LatencyMonitor
-from market_maker.config_rollback import ConfigRollbackWatchdog, PerformanceBaseline
-
 
 # ===================================================================
 # 1. P&L Attribution

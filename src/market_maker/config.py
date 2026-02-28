@@ -19,9 +19,9 @@ from pydantic import Field, field_validator, model_validator
 from .config_base import MarketMakerSettingsBase
 from .config_env import (  # noqa: F401 — re-export for backwards compat
     ENV_FILE,
+    PROJECT_ROOT,
     MMEnvironment,
     OffsetMode,
-    PROJECT_ROOT,
     QuoteAnchor,
 )
 from .config_metadata import SETTINGS_FIELD_GROUPS  # noqa: F401 — re-export

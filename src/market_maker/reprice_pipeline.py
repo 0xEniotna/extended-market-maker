@@ -8,6 +8,8 @@ from typing import Any, Optional
 from .decision_models import GuardDecision, RegimeState, RepriceMarketContext, TrendState
 from .reprice_execution import (
     compute_risk_adjusted_order as _compute_risk_adjusted,
+)
+from .reprice_execution import (
     execute_replace_if_needed as _execute_replace,
 )
 from .types import StrategyContext

@@ -15,7 +15,7 @@ import asyncio
 import logging
 import time
 from decimal import Decimal
-from typing import Any, Optional, Protocol, Set
+from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 

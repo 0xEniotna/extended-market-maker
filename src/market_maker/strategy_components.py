@@ -11,7 +11,7 @@ import logging
 import os
 import subprocess
 import time
-from decimal import ROUND_DOWN, Decimal
+from decimal import Decimal
 from typing import Any, Dict, Optional
 
 from .config import ENV_FILE, MarketMakerSettings

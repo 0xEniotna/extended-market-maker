@@ -5,7 +5,6 @@ import os
 from enum import Enum
 from pathlib import Path
 
-
 # ---------------------------------------------------------------------------
 # Env file resolution (mirrors existing pattern in settings.py)
 # ---------------------------------------------------------------------------

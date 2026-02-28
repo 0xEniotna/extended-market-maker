@@ -10,7 +10,7 @@ import logging
 import time
 from collections import deque
 from decimal import Decimal
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from x10.perpetual.orders import OrderSide
 

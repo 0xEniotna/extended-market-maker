@@ -1,15 +1,13 @@
 """Tests for Phase 3 code quality refactors."""
 from __future__ import annotations
 
-import math
 from decimal import Decimal
-from typing import Any, Dict, Optional, Set
+from typing import Set
 from unittest.mock import MagicMock
 
 import pytest
 
 from market_maker.quote_halt_manager import QuoteHaltManager
-
 
 # ===================================================================
 # 1. QuoteHaltManager
@@ -145,7 +143,7 @@ class TestQuoteHaltManager:
 # 2. Pricing engine float conversion
 # ===================================================================
 
-from market_maker.pricing_engine import PricingEngine
+from market_maker.pricing_engine import PricingEngine  # noqa: E402
 
 
 class _FakeRisk:
@@ -337,7 +335,7 @@ class TestPricingEngineFloat:
 # 3. Policy generation (generate_policy.py)
 # ===================================================================
 
-from market_maker.config import MarketMakerSettings
+from market_maker.config import MarketMakerSettings  # noqa: E402
 
 
 class TestConfigGrouping:
@@ -412,7 +410,7 @@ class TestConfigGrouping:
 # 4. FundingManager
 # ===================================================================
 
-from market_maker.funding_manager import FundingManager
+from market_maker.funding_manager import FundingManager  # noqa: E402
 
 
 class TestFundingManager:
@@ -521,7 +519,7 @@ class TestFundingManager:
 # 5. RiskWatchdog
 # ===================================================================
 
-from market_maker.risk_watchdog import RiskWatchdog
+from market_maker.risk_watchdog import RiskWatchdog  # noqa: E402
 
 
 class _FakeDrawdownState:
@@ -638,7 +636,7 @@ class TestRiskWatchdog:
 # 6. Shared utils
 # ===================================================================
 
-from market_maker.utils import safe_decimal, safe_float
+from market_maker.utils import safe_decimal, safe_float  # noqa: E402
 
 
 class TestSharedUtils:
@@ -691,7 +689,7 @@ class TestSharedUtils:
 # 7. StrategyFactory (requires x10 SDK stubs)
 # ===================================================================
 
-import sys
+import sys  # noqa: E402
 
 # StrategyFactory transitively imports x10 SDK types. If the SDK is not
 # installed (CI / lightweight test env), skip the factory tests.

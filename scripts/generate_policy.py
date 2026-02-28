@@ -23,7 +23,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
-from market_maker.config import MarketMakerSettings, SETTINGS_FIELD_GROUPS  # noqa: E402
+from market_maker.config import MarketMakerSettings  # noqa: E402
 
 POLICY_DIR = _REPO_ROOT / "mm_config" / "policy"
 

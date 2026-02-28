@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import logging
 import time
-from decimal import ROUND_DOWN, Decimal
-from typing import Dict, Optional
+from decimal import Decimal
+from typing import Dict
 
 from x10.perpetual.orders import OrderSide
 from x10.perpetual.positions import PositionModel, PositionSide, PositionStatus

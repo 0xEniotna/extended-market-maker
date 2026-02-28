@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -12,9 +13,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
-
-import fcntl
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 DEFAULT_CONFIG_ROOT = Path("mm_config")
 DEFAULT_ENV_DIR = Path("./mm-env")

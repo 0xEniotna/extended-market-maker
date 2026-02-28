@@ -1,10 +1,8 @@
 """Field group definitions and metadata helpers for MarketMakerSettings."""
 from __future__ import annotations
 
-from typing import Any, Dict, FrozenSet, List, Literal, Optional
-
 from decimal import Decimal
-
+from typing import Any, Dict, FrozenSet, List, Literal, Optional
 
 # ---------------------------------------------------------------------------
 # Field group definitions
