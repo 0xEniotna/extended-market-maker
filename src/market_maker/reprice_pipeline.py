@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Any, Optional
 
 from .decision_models import GuardDecision, RegimeState, RepriceMarketContext, TrendState
+from .types import StrategyContext
 
 
 @dataclass
@@ -98,7 +99,7 @@ class RepricePipeline:
 
         return True, "replace_target_shift"
 
-    def build_level_context(self, strategy, side, level: int) -> LevelContext:
+    def build_level_context(self, strategy: StrategyContext, side, level: int) -> LevelContext:
         key = (str(side), level)
         prev_ext_id = strategy._level_ext_ids.get(key)
         prev_order = strategy._orders.get_active_order(prev_ext_id)
@@ -110,14 +111,14 @@ class RepricePipeline:
         )
 
     @staticmethod
-    def _inventory_override_active(strategy, side, market_ctx: RepriceMarketContext) -> bool:
+    def _inventory_override_active(strategy: StrategyContext, side, market_ctx: RepriceMarketContext) -> bool:
         reduces_inventory = not strategy._increases_inventory(side)
         inventory_elevated = market_ctx.inventory_band in {"WARN", "CRITICAL", "HARD"}
         return reduces_inventory and inventory_elevated
 
     async def evaluate_blocking_conditions(
         self,
-        strategy,
+        strategy: StrategyContext,
         side,
         level: int,
         *,
@@ -216,7 +217,7 @@ class RepricePipeline:
 
     async def _prepare_quote_inputs(
         self,
-        strategy,
+        strategy: StrategyContext,
         side,
         level: int,
         *,
@@ -298,7 +299,7 @@ class RepricePipeline:
 
     async def _evaluate_existing_order(
         self,
-        strategy,
+        strategy: StrategyContext,
         side,
         level: int,
         *,
@@ -362,7 +363,7 @@ class RepricePipeline:
 
     def compute_risk_adjusted_order(
         self,
-        strategy,
+        strategy: StrategyContext,
         side,
         level: int,
         *,
@@ -431,7 +432,7 @@ class RepricePipeline:
 
     async def execute_replace_if_needed(
         self,
-        strategy,
+        strategy: StrategyContext,
         side,
         level: int,
         *,
@@ -523,7 +524,7 @@ class RepricePipeline:
 
     def _resolve_market_context(
         self,
-        strategy,
+        strategy: StrategyContext,
         market_ctx: Optional[RepriceMarketContext],
     ) -> RepriceMarketContext:
         if market_ctx is not None:
@@ -550,7 +551,7 @@ class RepricePipeline:
 
     async def evaluate(
         self,
-        strategy,
+        strategy: StrategyContext,
         side,
         level: int,
         *,

@@ -44,6 +44,7 @@ from .orderbook_manager import OrderbookManager
 from .pnl_attribution import PnLAttributionTracker
 from .post_only_safety import PostOnlySafety
 from .pricing_engine import PricingEngine
+from .quote_halt_manager import QuoteHaltManager
 from .quote_trade_ratio import QuoteTradeRatioTracker
 from .reprice_pipeline import RepricePipeline
 from .risk_manager import RiskManager
@@ -139,8 +140,11 @@ class MarketMakerStrategy:
 
         # Circuit-breaker / halt state
         self._circuit_open = False
-        self._quote_halt_reasons: Set[str] = set()
-        self._margin_breach_since: Optional[float] = None
+        self._halt_mgr = QuoteHaltManager(
+            market_name=settings.market_name,
+            journal=journal,
+            metrics=metrics,
+        )
         self._runtime_mode: str = "normal"
         self._last_taker_leakage_warn_at: float = 0.0
 
@@ -708,59 +712,42 @@ class MarketMakerStrategy:
     def _set_runtime_mode(self, mode: str) -> None:
         self._runtime_mode = str(mode)
 
+    # ------------------------------------------------------------------
+    # Quote halt delegation — see QuoteHaltManager for full logic
+    # ------------------------------------------------------------------
+
+    @property
+    def _quote_halt_reasons(self) -> Set[str]:
+        return self._halt_mgr.reasons
+
+    @property
+    def _margin_breach_since(self) -> Optional[float]:
+        return self._halt_mgr.margin_breach_since
+
+    @_margin_breach_since.setter
+    def _margin_breach_since(self, value: Optional[float]) -> None:
+        self._halt_mgr.margin_breach_since = value
+
     def _is_normal_quoting_mode(self) -> bool:
         return (
             self._runtime_mode == "normal"
             and not self._shutdown_event.is_set()
-            and not self._quote_halt_reasons
+            and not self._halt_mgr.is_halted
         )
 
     def _set_quote_halt(self, reason: str) -> None:
-        if reason in self._quote_halt_reasons:
-            return
-        self._quote_halt_reasons.add(reason)
-        logger.warning(
-            "Quote halt engaged for %s: reasons=%s",
-            self._settings.market_name,
-            sorted(self._quote_halt_reasons),
-        )
-        self._journal.record_exchange_event(
-            event_type="quote_halt",
-            details={"reason": reason, "reasons": sorted(self._quote_halt_reasons)},
-        )
-        self._metrics.set_quote_halt_state(self._quote_halt_reasons)
+        self._halt_mgr.set_halt(reason)
 
     def _clear_quote_halt(self, reason: str) -> None:
-        if reason not in self._quote_halt_reasons:
-            return
-        self._quote_halt_reasons.discard(reason)
-        logger.info(
-            "Quote halt reason cleared for %s: %s (remaining=%s)",
-            self._settings.market_name,
-            reason,
-            sorted(self._quote_halt_reasons),
-        )
-        self._journal.record_exchange_event(
-            event_type="quote_halt_cleared",
-            details={"reason": reason, "remaining": sorted(self._quote_halt_reasons)},
-        )
-        self._metrics.set_quote_halt_state(self._quote_halt_reasons)
+        self._halt_mgr.clear_halt(reason)
 
     def _streams_healthy(self) -> bool:
-        account_ok = True
-        if hasattr(self._account_stream, "is_sequence_healthy"):
-            account_state = self._account_stream.is_sequence_healthy()
-            account_ok = account_state if isinstance(account_state, bool) else True
-        book_ok = True
-        if hasattr(self._ob, "is_sequence_healthy"):
-            book_state = self._ob.is_sequence_healthy()
-            book_ok = book_state if isinstance(book_state, bool) else True
-        has_data_fn = getattr(self._ob, "has_data", None)
-        has_data = has_data_fn() if callable(has_data_fn) else True
-        return account_ok and book_ok and has_data
+        return QuoteHaltManager.check_streams_healthy(
+            self._account_stream, self._ob,
+        )
 
     async def _on_stream_desync(self, reason: str) -> None:
-        self._set_quote_halt("stream_desync")
+        self._halt_mgr.set_halt("stream_desync")
         self._journal.record_exchange_event(
             event_type="stream_desync",
             details={"reason": reason},
@@ -775,17 +762,10 @@ class MarketMakerStrategy:
         rate_limit_halt = getattr(self._orders, "in_rate_limit_halt", False)
         if not isinstance(rate_limit_halt, bool):
             rate_limit_halt = False
-        if rate_limit_halt:
-            self._set_quote_halt("rate_limit_halt")
-        else:
-            self._clear_quote_halt("rate_limit_halt")
-
-        if self._streams_healthy():
-            self._clear_quote_halt("stream_desync")
-        else:
-            self._set_quote_halt("stream_desync")
-        self._metrics.set_quote_halt_state(self._quote_halt_reasons)
-        self._metrics.set_margin_guard_breached(self._margin_breach_since is not None)
+        self._halt_mgr.sync_state(
+            rate_limit_halt=rate_limit_halt,
+            streams_healthy=self._streams_healthy(),
+        )
 
     def _rebuild_components(self) -> None:
         quote_anchor = str(getattr(self._settings.quote_anchor, "value", self._settings.quote_anchor)).lower()
