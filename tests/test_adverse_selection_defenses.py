@@ -156,7 +156,7 @@ async def test_latency_tracking_cleared_on_rejection():
     )
     assert result is None
     assert mgr.latency_sample_count() == 0
-    assert len(mgr._placement_send_ts) == 0
+    assert len(mgr._latency._send_ts) == 0
 
 
 @pytest.mark.asyncio
@@ -170,7 +170,7 @@ async def test_latency_tracking_cleared_on_exception():
         side=OrderSide.BUY, price=Decimal("10"), size=Decimal("1"), level=0
     )
     assert result is None
-    assert len(mgr._placement_send_ts) == 0
+    assert len(mgr._latency._send_ts) == 0
 
 
 @pytest.mark.asyncio

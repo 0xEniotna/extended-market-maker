@@ -9,11 +9,11 @@ from pathlib import Path
 import pytest
 
 from market_maker.mm_config_pipeline import (
+    Policy,
     ProposalApplyError,
+    ProposalManager,
     ProposalValidationError,
     ProposalValidator,
-    Policy,
-    ProposalManager,
     update_env_lines_preserving_format,
 )
 from market_maker.mmctl import main as mmctl_main

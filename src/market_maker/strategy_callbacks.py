@@ -96,6 +96,27 @@ def on_fill(strategy, fill: FillEvent) -> None:
         market_snapshot=market_snapshot,
     )
 
+    # --- P&L attribution ---
+    pnl_attr = getattr(strategy, "_pnl_attribution", None)
+    if pnl_attr is not None:
+        mid_price = None
+        if bid is not None and ask is not None and bid.price > 0:
+            mid_price = (bid.price + ask.price) / 2
+        side_name = strategy._normalise_side(str(fill.side))
+        pnl_attr.record_fill(
+            side=side_name,
+            price=fill.price,
+            qty=fill.qty,
+            fee=fill.fee,
+            is_taker=bool(fill.is_taker),
+            mid_price=mid_price,
+        )
+
+    # --- Quote-to-trade ratio: record fill ---
+    qtr = getattr(strategy, "_qtr", None)
+    if qtr is not None and not fill.is_taker:
+        qtr.record_fill()
+
 
 def on_level_freed(
     strategy,

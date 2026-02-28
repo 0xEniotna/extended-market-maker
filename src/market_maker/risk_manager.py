@@ -12,11 +12,13 @@ from __future__ import annotations
 import logging
 import time
 from decimal import Decimal
-from typing import Dict, Optional
+from typing import Dict
 
 from x10.perpetual.orders import OrderSide
 from x10.perpetual.positions import PositionModel, PositionSide, PositionStatus
 from x10.perpetual.trading_client import PerpetualTradingClient
+
+from .risk_sizing import allowed_order_size as _allowed_order_size
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,7 @@ class RiskManager:
         balance_notional_multiplier: Decimal = Decimal("1.0"),
         balance_min_available_usd: Decimal = Decimal("0"),
         balance_staleness_max_s: float = 30.0,
+        balance_stale_action: str = "reduce",
         orderbook_mgr=None,
     ) -> None:
         self._client = trading_client
@@ -58,11 +61,14 @@ class RiskManager:
         self._balance_notional_multiplier = max(Decimal("0"), balance_notional_multiplier)
         self._balance_min_available_usd = max(Decimal("0"), balance_min_available_usd)
         self._balance_staleness_max_s = max(0.0, float(balance_staleness_max_s))
+        self._balance_stale_action = balance_stale_action if balance_stale_action in ("skip", "reduce", "halt") else "reduce"
         self._orderbook_mgr = orderbook_mgr
         self._cached_position: Decimal = Decimal("0")
         self._cached_realized_pnl: Decimal = Decimal("0")
         self._cached_unrealized_pnl: Decimal = Decimal("0")
         self._cached_total_position_pnl: Decimal = Decimal("0")
+        # Cumulative session P&L: survives position close/reset cycles.
+        self._session_realized_pnl: Decimal = Decimal("0")
         self._cached_available_for_trade: Decimal | None = None
         self._cached_equity: Decimal | None = None
         self._cached_initial_margin: Decimal | None = None
@@ -235,6 +241,15 @@ class RiskManager:
         """Return last cached realised+unrealised PnL for this market position."""
         return self._cached_total_position_pnl
 
+    def get_session_pnl(self) -> Decimal:
+        """Return cumulative session P&L (survives position close/reset cycles).
+
+        This is the sum of all realized P&L accumulated across every position
+        lifecycle in this process, plus the current position's total
+        (realized + unrealized) P&L.
+        """
+        return self._session_realized_pnl + self._cached_total_position_pnl
+
     def get_available_for_trade(self) -> Decimal | None:
         """Return the last cached available-for-trade collateral."""
         return self._cached_available_for_trade
@@ -305,42 +320,6 @@ class RiskManager:
             "liq_distance_bps": self.liquidation_distance_bps(),
         }
 
-    def _effective_max_position_for_side(self, side: OrderSide) -> Decimal:
-        """Return the effective max position size for the given side.
-
-        Uses per-side limits when configured (> 0), falling back to the
-        symmetric ``max_position_size``.
-        """
-        is_buy = self._is_buy_side(side)
-        if is_buy and self._max_long_position_size > 0:
-            return self._max_long_position_size
-        if not is_buy and self._max_short_position_size > 0:
-            return self._max_short_position_size
-        return self._max_position_size
-
-    def _get_orderbook_mid_price(self) -> Optional[Decimal]:
-        """Fetch mid price from orderbook manager if available and fresh."""
-        if self._orderbook_mgr is None:
-            return None
-        if self._orderbook_mgr.is_stale():
-            return None
-        bid = self._orderbook_mgr.best_bid()
-        ask = self._orderbook_mgr.best_ask()
-        if bid is None or ask is None:
-            return None
-        if bid.price <= 0 or ask.price <= 0:
-            return None
-        return Decimal(str((bid.price + ask.price) / 2))
-
-    def _is_balance_stale(self) -> bool:
-        """Return True if cached balance is older than staleness threshold."""
-        if self._balance_staleness_max_s <= 0:
-            return False
-        if self._cached_balance_updated_at is None:
-            return True
-        age = time.monotonic() - self._cached_balance_updated_at
-        return age > self._balance_staleness_max_s
-
     def allowed_order_size(
         self,
         side: OrderSide,
@@ -349,138 +328,11 @@ class RiskManager:
         reserved_same_side_qty: Decimal = Decimal("0"),
         reserved_open_notional_usd: Decimal = Decimal("0"),
     ) -> Decimal:
-        """Return the maximum safe size that can be placed for this order.
-
-        Clips by:
-        - contract position size limit (per-side or symmetric ``max_position_size``)
-        - per-order notional cap (``max_order_notional_usd``)
-        - total position notional cap (``max_position_notional_usd``)
-        - gross exposure limit (``gross_exposure_limit_usd``)
-        - reserved same-side resting quantity headroom
-        - in-flight order notional
-        - account available_for_trade headroom (when enabled, skipped if stale)
-        - orderbook staleness check (returns 0 if orderbook is stale)
-        """
-        if requested_size <= 0:
-            return Decimal("0")
-
-        # --- Resolve reference price from orderbook if available ---
-        ob_mid = self._get_orderbook_mid_price()
-        if ob_mid is not None:
-            reference_price = ob_mid
-        elif self._orderbook_mgr is not None and self._orderbook_mgr.is_stale():
-            # Orderbook is configured but stale — refuse to size
-            logger.info(
-                "Order size zeroed: orderbook is stale, refusing to size"
-            )
-            return Decimal("0")
-
-        clipped = requested_size
-        current = self._cached_position
-        reserved_same_side_qty = max(Decimal("0"), reserved_same_side_qty)
-        reserved_open_notional_usd = max(Decimal("0"), reserved_open_notional_usd)
-        inflight_notional = self.total_inflight_notional()
-
-        # --- Per-side position size headroom ---
-        effective_max = self._effective_max_position_for_side(side)
-        if effective_max > 0:
-            if side == OrderSide.BUY:
-                qty_headroom = effective_max - current - reserved_same_side_qty
-            else:
-                qty_headroom = effective_max + current - reserved_same_side_qty
-            clipped = min(clipped, max(Decimal("0"), qty_headroom))
-
-        if reference_price > 0:
-            # Per-order notional cap.
-            if self._max_order_notional_usd > 0:
-                per_order_max_size = self._max_order_notional_usd / reference_price
-                clipped = min(clipped, max(Decimal("0"), per_order_max_size))
-
-            # Absolute position notional cap.
-            if self._max_position_notional_usd > 0:
-                current_notional = abs(current) * reference_price
-                reserved_notional = reserved_same_side_qty * reference_price
-                remaining_notional = (
-                    self._max_position_notional_usd
-                    - current_notional
-                    - reserved_notional
-                )
-                if remaining_notional <= 0:
-                    clipped = Decimal("0")
-                else:
-                    max_size_from_pos_notional = remaining_notional / reference_price
-                    clipped = min(
-                        clipped,
-                        max(Decimal("0"), max_size_from_pos_notional),
-                    )
-
-            # --- Gross exposure limit ---
-            if self._gross_exposure_limit_usd > 0:
-                position_notional = abs(current) * reference_price
-                total_order_notional = reserved_open_notional_usd + inflight_notional
-                current_gross = position_notional + total_order_notional
-                gross_headroom = self._gross_exposure_limit_usd - current_gross
-                if gross_headroom <= 0:
-                    clipped = Decimal("0")
-                else:
-                    max_size_from_gross = gross_headroom / reference_price
-                    clipped = min(clipped, max(Decimal("0"), max_size_from_gross))
-
-            reducing_qty, opening_qty = self._split_reducing_and_opening_qty(
-                side=side,
-                current_position=current,
-                size=clipped,
-            )
-
-            # --- Balance-aware sizing (with staleness guard) ---
-            balance_available = self._cached_available_for_trade
-            if self._is_balance_stale():
-                balance_available = None
-
-            if (
-                self._balance_aware_sizing_enabled
-                and balance_available is not None
-                and opening_qty > 0
-            ):
-                balance_headroom = (
-                    balance_available * self._balance_usage_factor
-                ) - self._balance_min_available_usd
-                notional_headroom = (
-                    balance_headroom * self._balance_notional_multiplier
-                ) - reserved_open_notional_usd - inflight_notional
-                if notional_headroom <= 0:
-                    opening_qty = Decimal("0")
-                else:
-                    max_size_from_balance = notional_headroom / reference_price
-                    opening_qty = min(
-                        opening_qty,
-                        max(Decimal("0"), max_size_from_balance),
-                    )
-                clipped = reducing_qty + opening_qty
-
-        clipped = max(Decimal("0"), clipped)
-        if clipped < requested_size:
-            reducing_qty, opening_qty = self._split_reducing_and_opening_qty(
-                side=side,
-                current_position=current,
-                size=clipped,
-            )
-            logger.info(
-                "Order size clipped: side=%s requested=%s allowed=%s reducing=%s opening=%s "
-                "reserved_qty=%s reserved_notional=%s inflight_notional=%s "
-                "avail_for_trade=%s ref_price=%s",
-                side,
-                requested_size,
-                clipped,
-                reducing_qty,
-                opening_qty,
-                reserved_same_side_qty,
-                reserved_open_notional_usd,
-                inflight_notional,
-                self._cached_available_for_trade,
-                reference_price,
-            )
-        return clipped
+        return _allowed_order_size(
+            self, side, requested_size, reference_price,
+            reserved_same_side_qty=reserved_same_side_qty,
+            reserved_open_notional_usd=reserved_open_notional_usd,
+        )
 
     def can_place_order(self, side: OrderSide, size: Decimal) -> bool:
         """Check whether placing *size* on *side* would breach the position limit.
@@ -530,6 +382,8 @@ class RiskManager:
         self._cached_total_position_pnl = realized_dec + unrealized_dec
 
     def _reset_position_pnl(self) -> None:
+        # Accumulate realized P&L into session total before zeroing.
+        self._session_realized_pnl += self._cached_realized_pnl
         self._cached_realized_pnl = Decimal("0")
         self._cached_unrealized_pnl = Decimal("0")
         self._cached_total_position_pnl = Decimal("0")

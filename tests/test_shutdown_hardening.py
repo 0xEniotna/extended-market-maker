@@ -56,16 +56,16 @@ _positions_mod.PositionModel = object
 _positions_mod.PositionSide = SimpleNamespace(SHORT="SHORT", LONG="LONG")
 _positions_mod.PositionStatus = SimpleNamespace(CLOSED="CLOSED", OPENED="OPENED")
 
-from market_maker import strategy_runner  # noqa: E402
+from market_maker import shutdown_manager  # noqa: E402, I001
 from market_maker.order_manager import FlattenResult, OrderManager  # noqa: E402
-from market_maker.strategy_runner import (  # noqa: E402
-    RuntimeContext,
-    _attempt_shutdown_flatten,
-    _compute_progressive_slippage,
-    _shutdown_core,
+from market_maker.shutdown_manager import (  # noqa: E402
     _write_json_state,
     _write_pre_shutdown_state,
+    attempt_shutdown_flatten as _attempt_shutdown_flatten,
+    compute_progressive_slippage as _compute_progressive_slippage,
+    shutdown_core as _shutdown_core,
 )
+from market_maker.strategy_runner import RuntimeContext  # noqa: E402
 
 OrderSide = _orders_mod.OrderSide
 
@@ -279,8 +279,8 @@ class TestProgressiveSlippage:
         )
 
         # Reset module state
-        strategy_runner._shutdown_in_progress = False
-        strategy_runner._force_exit_event = None
+        shutdown_manager._shutdown_in_progress = False
+        shutdown_manager._force_exit_event = None
 
         await _attempt_shutdown_flatten(ctx, "shutdown")
 
@@ -307,8 +307,8 @@ class TestProgressiveSlippage:
             refresh_position_positions=[Decimal("0")],
         )
 
-        strategy_runner._shutdown_in_progress = False
-        strategy_runner._force_exit_event = None
+        shutdown_manager._shutdown_in_progress = False
+        shutdown_manager._force_exit_event = None
 
         result = await _attempt_shutdown_flatten(ctx, "shutdown")
 
@@ -334,13 +334,13 @@ class TestShutdownTimeout:
         async def _slow_core(ctx, tasks):
             await asyncio.sleep(10)  # Way longer than timeout
 
-        strategy_runner._shutdown_in_progress = False
-        strategy_runner._force_exit_event = None
+        shutdown_manager._shutdown_in_progress = False
+        shutdown_manager._force_exit_event = None
 
-        with patch.object(strategy_runner, "_shutdown_core", _slow_core):
-            with patch.object(strategy_runner, "_write_emergency_state") as mock_emergency:
+        with patch.object(shutdown_manager, "shutdown_core", _slow_core):
+            with patch.object(shutdown_manager, "_write_emergency_state") as mock_emergency:
                 with patch("os._exit") as mock_exit:
-                    await strategy_runner._shutdown_and_record(ctx, [])
+                    await shutdown_manager.shutdown_and_record(ctx, [])
                     mock_emergency.assert_called_once()
                     mock_exit.assert_called_once_with(1)
 
@@ -367,9 +367,9 @@ class TestDoubleSignalForceExit:
         )
 
         # Simulate force-exit already signaled
-        strategy_runner._shutdown_in_progress = True
-        strategy_runner._force_exit_event = asyncio.Event()
-        strategy_runner._force_exit_event.set()
+        shutdown_manager._shutdown_in_progress = True
+        shutdown_manager._force_exit_event = asyncio.Event()
+        shutdown_manager._force_exit_event.set()
 
         result = await _attempt_shutdown_flatten(ctx, "shutdown")
 
@@ -381,12 +381,12 @@ class TestDoubleSignalForceExit:
         """_shutdown_core should skip flatten when force_exit_event is set."""
         ctx = _make_ctx(position=Decimal("10"))
 
-        strategy_runner._shutdown_in_progress = False
-        strategy_runner._force_exit_event = asyncio.Event()
-        strategy_runner._force_exit_event.set()
+        shutdown_manager._shutdown_in_progress = False
+        shutdown_manager._force_exit_event = asyncio.Event()
+        shutdown_manager._force_exit_event.set()
 
-        with patch.object(strategy_runner, "_write_pre_shutdown_state"):
-            with patch.object(strategy_runner, "_stop_services", new_callable=AsyncMock):
+        with patch.object(shutdown_manager, "_write_pre_shutdown_state"):
+            with patch.object(shutdown_manager, "stop_services", new_callable=AsyncMock):
                 await _shutdown_core(ctx, [])
 
         # flatten should not have been called on order_mgr
@@ -394,18 +394,18 @@ class TestDoubleSignalForceExit:
 
     def test_double_signal_handler_sets_force_exit(self):
         """On second signal during shutdown, force_exit_event should be set."""
-        strategy_runner._shutdown_in_progress = True
-        strategy_runner._force_exit_event = asyncio.Event()
+        shutdown_manager._shutdown_in_progress = True
+        shutdown_manager._force_exit_event = asyncio.Event()
 
         # The handler is installed inside _install_signal_handlers,
         # but we can test the logic by simulating the second call.
         # force_exit_event should be set.
-        assert not strategy_runner._force_exit_event.is_set()
+        assert not shutdown_manager._force_exit_event.is_set()
 
         # Simulate what _double_signal_handler does on second signal
-        strategy_runner._force_exit_event.set()
+        shutdown_manager._force_exit_event.set()
 
-        assert strategy_runner._force_exit_event.is_set()
+        assert shutdown_manager._force_exit_event.is_set()
 
 
 # ===================================================================
@@ -557,7 +557,7 @@ class TestPreShutdownState:
     def test_write_pre_shutdown_state_includes_all_fields(self, tmp_path):
         ctx = _make_ctx(position=Decimal("5"))
 
-        with patch.object(strategy_runner, "_write_json_state") as mock_write:
+        with patch.object(shutdown_manager, "_write_json_state") as mock_write:
             mock_write.return_value = tmp_path / "test.json"
             _write_pre_shutdown_state(ctx, "shutdown")
 
@@ -589,8 +589,8 @@ class TestFreshRESTVerification:
             settings_overrides={"shutdown_flatten_retries": 1},
         )
 
-        strategy_runner._shutdown_in_progress = False
-        strategy_runner._force_exit_event = None
+        shutdown_manager._shutdown_in_progress = False
+        shutdown_manager._force_exit_event = None
 
         import logging
         with caplog.at_level(logging.CRITICAL):
@@ -608,8 +608,8 @@ class TestFreshRESTVerification:
             refresh_position_positions=[Decimal("0")],
         )
 
-        strategy_runner._shutdown_in_progress = False
-        strategy_runner._force_exit_event = None
+        shutdown_manager._shutdown_in_progress = False
+        shutdown_manager._force_exit_event = None
 
         import logging
         with caplog.at_level(logging.CRITICAL):
@@ -648,18 +648,18 @@ class TestIntegration:
             ],
         )
 
-        strategy_runner._shutdown_in_progress = False
-        strategy_runner._force_exit_event = None
+        shutdown_manager._shutdown_in_progress = False
+        shutdown_manager._force_exit_event = None
 
-        with patch.object(strategy_runner, "_write_pre_shutdown_state"):
-            with patch.object(strategy_runner, "_stop_services", new_callable=AsyncMock):
+        with patch.object(shutdown_manager, "_write_pre_shutdown_state"):
+            with patch.object(shutdown_manager, "stop_services", new_callable=AsyncMock):
                 await _shutdown_core(ctx, [])
 
         ctx.order_mgr.cancel_all_orders.assert_awaited_once()
         ctx.order_mgr.flatten_position.assert_awaited_once()
         ctx.journal.record_run_end.assert_called_once()
         ctx.journal.close.assert_called_once()
-        assert strategy_runner._shutdown_in_progress is True
+        assert shutdown_manager._shutdown_in_progress is True
 
     @pytest.mark.asyncio
     async def test_flatten_passes_last_known_mid(self):
@@ -678,8 +678,8 @@ class TestIntegration:
             settings_overrides={"shutdown_flatten_retries": 1},
         )
 
-        strategy_runner._shutdown_in_progress = False
-        strategy_runner._force_exit_event = None
+        shutdown_manager._shutdown_in_progress = False
+        shutdown_manager._force_exit_event = None
 
         await _attempt_shutdown_flatten(ctx, "shutdown")
 

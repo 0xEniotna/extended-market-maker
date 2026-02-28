@@ -17,6 +17,7 @@ import os
 import time
 import traceback
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -75,6 +76,8 @@ class TradeJournal:
         # Batched fsync tracking.
         self._writes_since_fsync = 0
         self._last_fsync_ts = time.monotonic()
+        # Single-thread executor for non-blocking fsync on SD cards.
+        self._fsync_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="journal_fsync")
 
         ts = time.strftime("%Y%m%d_%H%M%S")
         self._base_stem = f"mm_{market_name}_{ts}"
@@ -123,12 +126,37 @@ class TradeJournal:
         self._maybe_rotate()
 
     def _do_fsync(self) -> None:
-        """Flush and fsync the underlying file descriptor."""
+        """Submit fsync to a background thread so the event loop is not blocked.
+
+        On SD-card media (Raspberry Pi), ``os.fsync()`` can stall for
+        10-500 ms during wear-leveling / garbage-collection.  Running it
+        in a single-thread executor keeps the asyncio loop responsive.
+        """
+        self._writes_since_fsync = 0
+        self._last_fsync_ts = time.monotonic()
+        try:
+            fh = self._fh
+            if fh and not fh.closed:
+                fh.flush()
+                self._fsync_executor.submit(self._fsync_fd, fh.fileno())
+        except (OSError, ValueError):
+            pass
+
+    @staticmethod
+    def _fsync_fd(fd: int) -> None:
+        """Perform the actual os.fsync — runs in the thread-pool."""
+        try:
+            os.fsync(fd)
+        except (OSError, ValueError):
+            pass
+
+    def _do_fsync_sync(self) -> None:
+        """Synchronous flush+fsync for shutdown / rotation (must complete)."""
         try:
             self._fh.flush()
             os.fsync(self._fh.fileno())
         except (OSError, ValueError):
-            pass  # File may be closed or invalid
+            pass
         self._writes_since_fsync = 0
         self._last_fsync_ts = time.monotonic()
 
@@ -150,7 +178,7 @@ class TradeJournal:
 
     def _rotate(self) -> None:
         """Close the current file and open a new one with incremented suffix."""
-        self._do_fsync()
+        self._do_fsync_sync()
         try:
             self._fh.close()
         except Exception:
@@ -461,9 +489,10 @@ class TradeJournal:
 
     def close(self) -> None:
         if self._fh and not self._fh.closed:
-            self._do_fsync()
+            self._do_fsync_sync()
             self._fh.close()
-            logger.info("Trade journal closed: %s", self._path)
+        self._fsync_executor.shutdown(wait=True)
+        logger.info("Trade journal closed: %s", self._path)
 
     @property
     def path(self) -> Path:

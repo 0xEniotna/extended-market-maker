@@ -21,7 +21,6 @@ from audit_report_common import (  # noqa: E402
     load_recent_entries,
     normalize_market_name,
     parse_env_map,
-    pct,
     quantile_average,
     rolling_price_change,
     round_or_none,

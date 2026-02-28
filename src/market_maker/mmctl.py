@@ -79,12 +79,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if payload["ok"] else 1
 
         if args.command == "rollback":
-            result = manager.rollback(
+            rb_result = manager.rollback(
                 args.market,
                 args.to,
                 lock_timeout_s=args.lock_timeout_s,
             )
-            payload = asdict(result)
+            payload = asdict(rb_result)
             if args.json:
                 _print_json(payload)
             else:

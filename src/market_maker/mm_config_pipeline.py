@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -12,9 +13,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
-
-import fcntl
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 DEFAULT_CONFIG_ROOT = Path("mm_config")
 DEFAULT_ENV_DIR = Path("./mm-env")
@@ -207,14 +206,14 @@ def _value_with_rule(key: str, raw_value: Any, rule: Dict[str, Any]) -> str:
             raise ProposalValidationError(f"{key} above max bound ({max_v})")
         return str(parsed)
     if value_type == "float":
-        parsed = _parse_float(raw_value, key=key)
+        parsed_dec = _parse_float(raw_value, key=key)
         min_v = rule.get("min")
         max_v = rule.get("max")
-        if min_v is not None and parsed < Decimal(str(min_v)):
+        if min_v is not None and parsed_dec < Decimal(str(min_v)):
             raise ProposalValidationError(f"{key} below min bound ({min_v})")
-        if max_v is not None and parsed > Decimal(str(max_v)):
+        if max_v is not None and parsed_dec > Decimal(str(max_v)):
             raise ProposalValidationError(f"{key} above max bound ({max_v})")
-        return _canonical_decimal(parsed)
+        return _canonical_decimal(parsed_dec)
     if value_type == "bool":
         return _normalize_bool(raw_value, key=key)
     if value_type == "string":

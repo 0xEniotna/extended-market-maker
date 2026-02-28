@@ -19,7 +19,6 @@ from audit_report_common import (  # noqa: E402
     collect_mid_series,
     compute_time_above_util,
     discover_market_journals,
-    is_block_reason,
     iso_utc,
     load_do_not_restart,
     load_market_env,
@@ -35,7 +34,6 @@ from audit_report_common import (  # noqa: E402
     zero_crossings,
 )
 from mm_audit_common import append_jsonl, write_json  # noqa: E402
-
 
 PNL_MARKET_RE = re.compile(
     r"^\s*\d+\.\s+([A-Z0-9_-]+)\s+total=([-0-9.]+)\s+closed=([-0-9.]+)\s+open_realized=([-0-9.]+)\s+open_unrealized=([-0-9.]+)",

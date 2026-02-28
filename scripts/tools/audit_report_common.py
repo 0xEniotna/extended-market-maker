@@ -3,18 +3,18 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from bisect import bisect_left
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-import sys
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 TOOLS_DIR = Path(__file__).resolve().parent
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
-from mm_audit_common import parse_env, read_env_lines, safe_decimal
+from mm_audit_common import parse_env, read_env_lines, safe_decimal  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
