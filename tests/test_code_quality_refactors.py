@@ -406,3 +406,307 @@ class TestConfigGrouping:
             assert key in model_env_names, (
                 f"bounds.json key {key} not found in MarketMakerSettings fields"
             )
+
+
+# ===================================================================
+# 4. FundingManager
+# ===================================================================
+
+from market_maker.funding_manager import FundingManager
+
+
+class TestFundingManager:
+
+    def test_initial_rate_is_zero(self):
+        fm = FundingManager(
+            market_profile="crypto",
+            funding_bias_enabled=True,
+            funding_inventory_weight=Decimal("1"),
+            funding_bias_cap_bps=Decimal("50"),
+        )
+        assert fm.funding_rate == Decimal("0")
+
+    def test_set_funding_rate_valid(self):
+        fm = FundingManager(
+            market_profile="crypto",
+            funding_bias_enabled=True,
+            funding_inventory_weight=Decimal("1"),
+            funding_bias_cap_bps=Decimal("50"),
+        )
+        fm.set_funding_rate(Decimal("0.0005"))
+        assert fm.funding_rate == Decimal("0.0005")
+
+    def test_set_funding_rate_invalid_ignored(self):
+        fm = FundingManager(
+            market_profile="crypto",
+            funding_bias_enabled=True,
+            funding_inventory_weight=Decimal("1"),
+            funding_bias_cap_bps=Decimal("50"),
+        )
+        fm.set_funding_rate(Decimal("0.001"))
+        fm.set_funding_rate("not-a-number")
+        assert fm.funding_rate == Decimal("0.001")  # Unchanged
+
+    def test_set_funding_rate_nan_ignored(self):
+        fm = FundingManager(
+            market_profile="crypto",
+            funding_bias_enabled=True,
+            funding_inventory_weight=Decimal("1"),
+            funding_bias_cap_bps=Decimal("50"),
+        )
+        fm.set_funding_rate(Decimal("0.001"))
+        fm.set_funding_rate(Decimal("NaN"))
+        assert fm.funding_rate == Decimal("0.001")
+
+    def test_funding_bias_non_crypto_returns_zero(self):
+        fm = FundingManager(
+            market_profile="equity",
+            funding_bias_enabled=True,
+            funding_inventory_weight=Decimal("1"),
+            funding_bias_cap_bps=Decimal("50"),
+        )
+        fm.set_funding_rate(Decimal("0.001"))
+        assert fm.funding_bias_bps() == Decimal("0")
+
+    def test_funding_bias_disabled_returns_zero(self):
+        fm = FundingManager(
+            market_profile="crypto",
+            funding_bias_enabled=False,
+            funding_inventory_weight=Decimal("1"),
+            funding_bias_cap_bps=Decimal("50"),
+        )
+        fm.set_funding_rate(Decimal("0.001"))
+        assert fm.funding_bias_bps() == Decimal("0")
+
+    def test_funding_bias_computation(self):
+        fm = FundingManager(
+            market_profile="crypto",
+            funding_bias_enabled=True,
+            funding_inventory_weight=Decimal("1"),
+            funding_bias_cap_bps=Decimal("50"),
+        )
+        fm.set_funding_rate(Decimal("0.001"))
+        # 0.001 * 10000 * 1 = 10 bps
+        assert fm.funding_bias_bps() == Decimal("10")
+
+    def test_funding_bias_capped(self):
+        fm = FundingManager(
+            market_profile="crypto",
+            funding_bias_enabled=True,
+            funding_inventory_weight=Decimal("2"),
+            funding_bias_cap_bps=Decimal("5"),
+        )
+        fm.set_funding_rate(Decimal("0.001"))
+        # 0.001 * 10000 * 2 = 20 bps, cap = 5
+        assert fm.funding_bias_bps() == Decimal("5")
+
+    def test_update_settings(self):
+        fm = FundingManager(
+            market_profile="crypto",
+            funding_bias_enabled=True,
+            funding_inventory_weight=Decimal("1"),
+            funding_bias_cap_bps=Decimal("50"),
+        )
+        fm.set_funding_rate(Decimal("0.001"))
+        fm.update_settings(
+            market_profile="equity",
+            funding_bias_enabled=True,
+            funding_inventory_weight=Decimal("1"),
+            funding_bias_cap_bps=Decimal("50"),
+        )
+        assert fm.funding_bias_bps() == Decimal("0")  # Equity → 0
+
+
+# ===================================================================
+# 5. RiskWatchdog
+# ===================================================================
+
+from market_maker.risk_watchdog import RiskWatchdog
+
+
+class _FakeDrawdownState:
+    triggered = False
+    current_pnl = Decimal("0")
+    peak_pnl = Decimal("0")
+    drawdown = Decimal("0")
+    threshold_usd = Decimal("0")
+
+
+class _FakeDrawdownStop:
+    def __init__(self, should_trigger=False):
+        self._trigger = should_trigger
+
+    def evaluate(self, pnl):
+        state = _FakeDrawdownState()
+        state.triggered = self._trigger
+        return state
+
+
+class _MockRiskWatchdogSettings:
+    market_name = "ETH-USD"
+    margin_guard_enabled = True
+    min_available_balance_for_trading = Decimal("10")
+    min_available_balance_ratio = Decimal("0")
+    max_margin_utilization = Decimal("0")
+    min_liq_distance_bps = Decimal("0")
+    margin_guard_shutdown_breach_s = Decimal("0")
+    circuit_breaker_max_failures = 5
+    circuit_breaker_cooldown_s = Decimal("30")
+    failure_window_s = Decimal("60")
+    failure_rate_trip = Decimal("0.5")
+    min_attempts_for_breaker = 3
+    max_order_age_s = Decimal("120")
+
+
+class _MockRiskMgr:
+    def __init__(self, position=Decimal("0")):
+        self._position = position
+
+    def get_current_position(self):
+        return self._position
+
+    def get_session_pnl(self):
+        return Decimal("0")
+
+    def margin_snapshot(self):
+        return {"available_for_trade": Decimal("100")}
+
+
+class TestRiskWatchdog:
+
+    def _make_watchdog(self, *, trigger_drawdown=False):
+        settings = _MockRiskWatchdogSettings()
+        risk = _MockRiskMgr()
+        orders = MagicMock()
+        halt_mgr = MagicMock()
+        halt_mgr.margin_breach_since = None
+        metrics = MagicMock()
+        journal = MagicMock()
+        journal.make_stack_trace_hash = MagicMock(return_value="abc")
+        post_only = MagicMock()
+        drawdown = _FakeDrawdownStop(should_trigger=trigger_drawdown)
+        shutdown_fn = MagicMock()
+        wd = RiskWatchdog(
+            settings=settings,
+            risk_mgr=risk,
+            orders=orders,
+            halt_mgr=halt_mgr,
+            metrics=metrics,
+            journal=journal,
+            post_only=post_only,
+            drawdown_stop=drawdown,
+            request_shutdown_fn=shutdown_fn,
+        )
+        return wd, shutdown_fn, halt_mgr
+
+    def test_circuit_open_initially_false(self):
+        wd, _, _ = self._make_watchdog()
+        assert wd.circuit_open is False
+
+    def test_evaluate_drawdown_stop_no_trigger(self):
+        wd, shutdown_fn, _ = self._make_watchdog(trigger_drawdown=False)
+        assert wd.evaluate_drawdown_stop() is False
+        shutdown_fn.assert_not_called()
+
+    def test_evaluate_drawdown_stop_triggers(self):
+        wd, shutdown_fn, _ = self._make_watchdog(trigger_drawdown=True)
+        assert wd.evaluate_drawdown_stop() is True
+        shutdown_fn.assert_called_once_with("drawdown_stop")
+
+    def test_margin_guard_breach_no_breach(self):
+        wd, _, _ = self._make_watchdog()
+        breached, reasons, snap = wd.margin_guard_breach()
+        assert breached is False
+        assert len(reasons) == 0
+
+    def test_margin_guard_breach_low_balance(self):
+        wd, _, _ = self._make_watchdog()
+        wd._risk.margin_snapshot = lambda: {"available_for_trade": Decimal("5")}
+        breached, reasons, snap = wd.margin_guard_breach()
+        assert breached is True
+        assert "available_for_trade" in reasons
+
+    def test_margin_guard_breach_missing_balance(self):
+        wd, _, _ = self._make_watchdog()
+        wd._risk.margin_snapshot = lambda: {"available_for_trade": None}
+        breached, reasons, snap = wd.margin_guard_breach()
+        assert breached is True
+        assert "available_for_trade_missing" in reasons
+
+
+# ===================================================================
+# 6. Shared utils
+# ===================================================================
+
+from market_maker.utils import safe_decimal, safe_float
+
+
+class TestSharedUtils:
+
+    def test_safe_decimal_normal(self):
+        assert safe_decimal("123.45") == Decimal("123.45")
+
+    def test_safe_decimal_from_int(self):
+        assert safe_decimal(42) == Decimal("42")
+
+    def test_safe_decimal_from_float(self):
+        result = safe_decimal(1.5)
+        assert result == Decimal("1.5")
+
+    def test_safe_decimal_invalid_returns_default(self):
+        assert safe_decimal("not-a-number") == Decimal("0")
+
+    def test_safe_decimal_none_returns_default(self):
+        assert safe_decimal(None) == Decimal("0")
+
+    def test_safe_decimal_custom_default(self):
+        assert safe_decimal("bad", default="99") == Decimal("99")
+
+    def test_safe_float_normal(self):
+        assert safe_float("42.5") == 42.5
+
+    def test_safe_float_invalid_returns_default(self):
+        assert safe_float("bad") == 0.0
+
+    def test_safe_float_none_returns_default(self):
+        assert safe_float(None) == 0.0
+
+    def test_safe_float_custom_default(self):
+        assert safe_float("bad", default=-1.0) == -1.0
+
+    def test_pricing_engine_uses_shared_helpers(self):
+        """Verify PricingEngine._to_decimal delegates to safe_decimal."""
+        result = PricingEngine._to_decimal("42.5")
+        assert result == Decimal("42.5")
+        assert PricingEngine._to_decimal("bad") == Decimal("0")
+
+    def test_pricing_engine_uses_shared_float_helper(self):
+        """Verify PricingEngine._to_float delegates to safe_float."""
+        result = PricingEngine._to_float("42.5")
+        assert result == 42.5
+        assert PricingEngine._to_float("bad") == 0.0
+
+
+# ===================================================================
+# 7. StrategyFactory (requires x10 SDK stubs)
+# ===================================================================
+
+import sys
+
+# StrategyFactory transitively imports x10 SDK types. If the SDK is not
+# installed (CI / lightweight test env), skip the factory tests.
+_x10_available = "x10.perpetual.trading_client" in sys.modules or True
+try:
+    from market_maker.strategy_factory import StrategyFactory
+except ImportError:
+    _x10_available = False
+    StrategyFactory = None  # type: ignore[assignment, misc]
+
+
+@pytest.mark.skipif(not _x10_available, reason="x10 SDK not available")
+class TestStrategyFactory:
+
+    def test_factory_creates_with_settings(self):
+        settings = MagicMock()
+        factory = StrategyFactory(settings)
+        assert factory._settings is settings

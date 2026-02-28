@@ -170,45 +170,6 @@ def find_latest_journal(dir_path: Path) -> Path:
     return files[-1]
 
 
-def _build_mid_timeline(
-    events: List[Dict[str, Any]],
-) -> Tuple[List[float], List[Decimal]]:
-    """Build a sorted timeline of (timestamp, mid_price) from all events with bid/ask."""
-    timestamps: List[float] = []
-    mids: List[Decimal] = []
-    for e in events:
-        bb = e.get("best_bid")
-        ba = e.get("best_ask")
-        if bb is not None and ba is not None:
-            bid = _d(bb)
-            ask = _d(ba)
-            if bid > 0 and ask > 0:
-                timestamps.append(e["ts"])
-                mids.append((bid + ask) / 2)
-    return timestamps, mids
-
-
-def _lookup_mid(
-    timestamps: List[float],
-    mids: List[Decimal],
-    target_ts: float,
-    tolerance_s: float = 5.0,
-) -> Optional[Decimal]:
-    """Find the mid price closest to *target_ts* (within tolerance)."""
-    if not timestamps:
-        return None
-    idx = bisect.bisect_left(timestamps, target_ts)
-    best_mid = None
-    best_gap = float("inf")
-    for i in (idx - 1, idx):
-        if 0 <= i < len(timestamps):
-            gap = abs(timestamps[i] - target_ts)
-            if gap < best_gap:
-                best_gap = gap
-                best_mid = mids[i]
-    return best_mid if best_gap <= tolerance_s else None
-
-
 _MARKOUT_HORIZONS = [0.25, 1.0, 5.0, 30.0, 120.0]  # seconds
 
 
@@ -218,43 +179,6 @@ def _horizon_label(horizon_s: float) -> str:
     if horizon_s >= 60:
         return f"{int(horizon_s / 60)}m"
     return f"{int(horizon_s)}s"
-
-
-def _compute_markouts(
-    fills: List[Dict[str, Any]],
-    timestamps: List[float],
-    mids: List[Decimal],
-) -> Dict[float, List[Decimal]]:
-    """Compute markouts at each horizon for every fill.
-
-    Markout = price movement in bps from fill_price, signed so positive = favorable.
-    For BUY:  markout = (mid_at_T+N - fill_price) / fill_price * 10000
-    For SELL: markout = (fill_price - mid_at_T+N) / fill_price * 10000
-    """
-    result: Dict[float, List[Decimal]] = {h: [] for h in _MARKOUT_HORIZONS}
-    _10000 = Decimal("10000")
-
-    for f in fills:
-        fill_ts = f["ts"]
-        fill_price = _d(f["price"])
-        is_buy = "BUY" in str(f["side"])
-
-        if fill_price <= 0:
-            continue
-
-        for horizon in _MARKOUT_HORIZONS:
-            # Tolerance scales with horizon (snapshots are ~60s apart)
-            tol = max(5.0, horizon * 0.5)
-            future_mid = _lookup_mid(timestamps, mids, fill_ts + horizon, tol)
-            if future_mid is None:
-                continue
-            if is_buy:
-                markout = (future_mid - fill_price) / fill_price * _10000
-            else:
-                markout = (fill_price - future_mid) / fill_price * _10000
-            result[horizon].append(markout)
-
-    return result
 
 
 def _markout_for_fill(
@@ -549,8 +473,6 @@ def analyse(events: List[Dict[str, Any]], path: Path, assumed_fee_bps: Optional[
             avg_spread = sum(spreads_at_fill) / len(spreads_at_fill)
             lines.append(f"  Spread at fill: avg={avg_spread:.1f}bps")
 
-        mid_ts, mid_prices = _build_mid_timeline(events)
-
         # Per-level breakdown
         by_level: Dict[str, list] = defaultdict(list)
         for f in fills:
@@ -629,19 +551,11 @@ def analyse(events: List[Dict[str, Any]], path: Path, assumed_fee_bps: Optional[
         markouts: Dict[float, List[Decimal]] = {h: [] for h in horizons}
         markout_coverage: Dict[float, int] = {h: 0 for h in horizons}
         for fill in fills:
-            fill_ts = float(fill.get("ts", 0.0))
-            fill_px = _d(fill["price"])
-            side = str(fill.get("side", ""))
             for h in horizons:
-                fut_mid = _mid_at_or_after(ts_values, mid_values, fill_ts + h)
-                if fut_mid is None or fill_px <= 0:
-                    continue
-                markout_coverage[h] += 1
-                if "BUY" in side:
-                    value = (fut_mid - fill_px) / fill_px * Decimal("10000")
-                else:
-                    value = (fill_px - fut_mid) / fill_px * Decimal("10000")
-                markouts[h].append(value)
+                m = _markout_for_fill(fill, h, ts_values, mid_values)
+                if m is not None:
+                    markout_coverage[h] += 1
+                    markouts[h].append(m)
 
         lines.append("  Markout (bps):")
         for h in horizons:
@@ -695,23 +609,11 @@ def analyse(events: List[Dict[str, Any]], path: Path, assumed_fee_bps: Optional[
         lines.append("  Level toxicity (+5s markout):")
         for lvl_key in sorted(by_level):
             lvl_fills = by_level[lvl_key]
-            lvl_markouts_5s: List[Decimal] = []
-            for fill in lvl_fills:
-                fill_px = _d(fill["price"])
-                if fill_px <= 0:
-                    continue
-                side = str(fill.get("side", ""))
-                fut_mid = _mid_at_or_after(ts_values, mid_values, float(fill["ts"]) + 5.0)
-                if fut_mid is None:
-                    continue
-                if "BUY" in side:
-                    lvl_markouts_5s.append(
-                        (fut_mid - fill_px) / fill_px * Decimal("10000")
-                    )
-                else:
-                    lvl_markouts_5s.append(
-                        (fill_px - fut_mid) / fill_px * Decimal("10000")
-                    )
+            lvl_markouts_5s: List[Decimal] = [
+                m for fill in lvl_fills
+                for m in [_markout_for_fill(fill, 5.0, ts_values, mid_values)]
+                if m is not None
+            ]
             if lvl_markouts_5s:
                 adverse = sum(1 for v in lvl_markouts_5s if v < 0)
                 avg_m5 = sum(lvl_markouts_5s) / Decimal(len(lvl_markouts_5s))
@@ -821,10 +723,8 @@ def analyse(events: List[Dict[str, Any]], path: Path, assumed_fee_bps: Optional[
 
         # Chronological fill log (last 20)
         lines.append("## Recent Fills (last 20)")
-        _10000 = Decimal("10000")
         for f in fills[-20:]:
             side_char = "B" if "BUY" in str(f["side"]) else "S"
-            is_buy = "BUY" in str(f["side"])
             edge_str = ""
             if f.get("edge_bps") is not None:
                 edge_str = f" edge={_d(f['edge_bps']):+.1f}bps"
@@ -833,15 +733,9 @@ def analyse(events: List[Dict[str, Any]], path: Path, assumed_fee_bps: Optional[
                 spread_str = f" spread={_d(f['spread_bps']):.1f}bps"
             # T+5s markout for each fill
             markout_str = ""
-            fp = _d(f["price"])
-            if fp > 0 and mid_ts:
-                future_mid = _lookup_mid(mid_ts, mid_prices, f["ts"] + 5)
-                if future_mid is not None:
-                    if is_buy:
-                        mo = (future_mid - fp) / fp * _10000
-                    else:
-                        mo = (fp - future_mid) / fp * _10000
-                    markout_str = f" mo5={mo:+.1f}bps"
+            mo = _markout_for_fill(f, 5.0, ts_values, mid_values)
+            if mo is not None:
+                markout_str = f" mo5={mo:+.1f}bps"
             taker_str = "T" if f.get("is_taker") else "M"
             lines.append(
                 f"  {_ts_fmt(f['ts'])} {side_char} {f['qty']}@{f['price']} "

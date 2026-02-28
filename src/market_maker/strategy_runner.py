@@ -7,13 +7,11 @@ import os
 import signal
 import sys
 import time
-import uuid
 from dataclasses import dataclass
-from decimal import ROUND_DOWN, Decimal
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Type
 
-from x10.perpetual.accounts import StarkPerpetualAccount
 from x10.perpetual.orders import OrderSide
 from x10.perpetual.trading_client import PerpetualTradingClient
 
@@ -24,6 +22,7 @@ from .metrics import MetricsCollector
 from .order_manager import OrderManager
 from .orderbook_manager import OrderbookManager
 from .risk_manager import RiskManager
+from .strategy_factory import StrategyFactory
 from .trade_journal import TradeJournal
 
 logger = logging.getLogger(__name__)
@@ -104,33 +103,14 @@ def _validate_startup(settings: MarketMakerSettings) -> bool:
 
 
 def _build_trading_client(settings: MarketMakerSettings) -> PerpetualTradingClient:
-    account = StarkPerpetualAccount(
-        vault=int(settings.vault_id),
-        private_key=settings.stark_private_key,
-        public_key=settings.stark_public_key,
-        api_key=settings.api_key,
-    )
-    return PerpetualTradingClient(settings.endpoint_config, account)
+    return StrategyFactory(settings).build_trading_client()
 
 
 async def _load_market_params(
     settings: MarketMakerSettings,
     trading_client: PerpetualTradingClient,
 ) -> tuple[Any, Decimal, Decimal, Decimal, Decimal]:
-    markets = await trading_client.markets_info.get_markets_dict()
-    market_info = markets.get(settings.market_name)
-    if market_info is None:
-        raise LookupError(f"Market {settings.market_name} not found on exchange")
-
-    tick_size = Decimal(str(market_info.trading_config.min_price_change))
-    min_order_size = Decimal(str(market_info.trading_config.min_order_size))
-    min_order_size_change = Decimal(str(market_info.trading_config.min_order_size_change))
-    order_size = (min_order_size * settings.order_size_multiplier).quantize(
-        min_order_size_change, rounding=ROUND_DOWN
-    )
-    if order_size < min_order_size:
-        order_size = min_order_size
-    return market_info, tick_size, min_order_size, min_order_size_change, order_size
+    return await StrategyFactory(settings).load_market_params(trading_client)
 
 
 def _log_market_params(
@@ -162,84 +142,35 @@ def _build_runtime_context(
     min_order_size_change: Decimal,
     order_size: Decimal,
 ) -> RuntimeContext:
-    fee_resolver = FeeResolver(
-        trading_client=trading_client,
-        market_name=settings.market_name,
-        refresh_interval_s=settings.fee_refresh_interval_s,
-        builder_program_enabled=settings.builder_program_enabled,
-        builder_id=settings.builder_id if settings.builder_id > 0 else None,
-        configured_builder_fee_rate=settings.builder_fee_rate,
-    )
-    ob_mgr = OrderbookManager(
-        settings.endpoint_config,
-        settings.market_name,
-        staleness_threshold_s=settings.orderbook_staleness_threshold_s,
-    )
-    order_mgr = OrderManager(
-        trading_client,
-        settings.market_name,
-        max_orders_per_second=settings.max_orders_per_second,
-        maintenance_pause_s=settings.maintenance_pause_s,
-        fee_resolver=fee_resolver,
-        rate_limit_degraded_s=settings.rate_limit_degraded_s,
-        rate_limit_halt_window_s=settings.rate_limit_halt_window_s,
-        rate_limit_halt_hits=settings.rate_limit_halt_hits,
-        rate_limit_halt_s=settings.rate_limit_halt_s,
-        rate_limit_extra_offset_bps=settings.rate_limit_extra_offset_bps,
-        rate_limit_reprice_multiplier=settings.rate_limit_reprice_multiplier,
-    )
-    risk_mgr = RiskManager(
-        trading_client,
-        settings.market_name,
-        settings.max_position_size,
-        max_order_notional_usd=settings.max_order_notional_usd,
-        max_position_notional_usd=settings.max_position_notional_usd,
-        gross_exposure_limit_usd=settings.gross_exposure_limit_usd,
-        max_long_position_size=settings.max_long_position_size,
-        max_short_position_size=settings.max_short_position_size,
-        balance_aware_sizing_enabled=settings.balance_aware_sizing_enabled,
-        balance_usage_factor=settings.balance_usage_factor,
-        balance_notional_multiplier=settings.balance_notional_multiplier,
-        balance_min_available_usd=settings.balance_min_available_usd,
-        balance_staleness_max_s=settings.balance_staleness_max_s,
-        balance_stale_action=settings.balance_stale_action,
-        orderbook_mgr=ob_mgr,
-    )
-    account_stream = AccountStreamManager(
-        settings.endpoint_config, settings.api_key, settings.market_name
-    )
-    journal = TradeJournal(
-        settings.market_name,
-        run_id=uuid.uuid4().hex,
-        schema_version=2,
-        max_size_mb=settings.journal_max_size_mb,
-    )
-    metrics = MetricsCollector(
-        orderbook_mgr=ob_mgr,
+    factory = StrategyFactory(settings)
+    fee_resolver = factory.build_fee_resolver(trading_client)
+    ob_mgr = factory.build_orderbook_manager()
+    order_mgr = factory.build_order_manager(trading_client, fee_resolver)
+    risk_mgr = factory.build_risk_manager(trading_client, ob_mgr)
+    account_stream = factory.build_account_stream()
+    journal = factory.build_journal()
+    metrics = factory.build_metrics(
+        ob_mgr=ob_mgr,
         order_mgr=order_mgr,
         risk_mgr=risk_mgr,
         account_stream=account_stream,
         journal=journal,
     )
-    strategy = strategy_cls(
-        settings=settings,
+    strategy = factory.build_strategy(
+        strategy_cls,
         trading_client=trading_client,
-        orderbook_mgr=ob_mgr,
+        market_info=market_info,
+        ob_mgr=ob_mgr,
         order_mgr=order_mgr,
         risk_mgr=risk_mgr,
         account_stream=account_stream,
         metrics=metrics,
         journal=journal,
         tick_size=tick_size,
-        base_order_size=order_size,
-        market_min_order_size=min_order_size,
-        min_order_size_step=min_order_size_change,
+        order_size=order_size,
+        min_order_size=min_order_size,
+        min_order_size_change=min_order_size_change,
     )
-    try:
-        strategy._set_funding_rate(Decimal(str(market_info.market_stats.funding_rate)))
-    except Exception:
-        logger.debug("Funding rate unavailable at startup", exc_info=True)
-
     return RuntimeContext(
         settings=settings,
         trading_client=trading_client,

@@ -13,6 +13,8 @@ from typing import Any, Dict, List
 
 import requests
 
+from .utils import safe_decimal
+
 MAINNET_API_BASE = "https://api.starknet.extended.exchange/api/v1"
 TESTNET_API_BASE = "https://api.starknet.sepolia.extended.exchange/api/v1"
 MARKETS_PATH = "/info/markets"
@@ -74,11 +76,7 @@ class PublicMarketsClient:
         return data
 
 
-def _to_decimal(value: Any) -> Decimal:
-    try:
-        return Decimal(str(value))
-    except Exception:
-        return Decimal("0")
+_to_decimal = safe_decimal
 
 
 def rank_markets_by_liquidity(

@@ -36,6 +36,7 @@ from .config_rollback import ConfigRollbackWatchdog, PerformanceBaseline
 from .decision_models import RegimeState, RepriceMarketContext, TrendState
 from .drawdown_stop import DrawdownStop
 from .fill_quality import FillQualityTracker
+from .funding_manager import FundingManager
 from .guard_policy import GuardPolicy
 from .latency_monitor import LatencyMonitor
 from .metrics import MetricsCollector
@@ -48,6 +49,7 @@ from .quote_halt_manager import QuoteHaltManager
 from .quote_trade_ratio import QuoteTradeRatioTracker
 from .reprice_pipeline import RepricePipeline
 from .risk_manager import RiskManager
+from .risk_watchdog import RiskWatchdog
 from .strategy_callbacks import on_fill, on_level_freed
 from .strategy_runner import run_strategy
 from .trade_journal import TradeJournal
@@ -74,19 +76,16 @@ _FATAL_EXCEPTION_PATTERNS = frozenset({
 # Refresh the exchange position every N seconds as a safety net.
 # The account stream handles real-time updates; this is a fallback.
 _POSITION_REFRESH_INTERVAL_S = 30.0
-_FUNDING_REFRESH_INTERVAL_S = 300.0
+# Funding refresh interval moved to FundingManager.
 _BALANCE_REFRESH_INTERVAL_S = 10.0
-_DRAWDOWN_CHECK_INTERVAL_S = 1.0
-_MARGIN_GUARD_CHECK_INTERVAL_S = 1.0
+# Drawdown/margin guard intervals moved to RiskWatchdog.
 _KPI_WATCHDOG_INTERVAL_S = 5.0
 _QTR_EVALUATE_INTERVAL_S = 30.0
 _LATENCY_SLA_INTERVAL_S = 10.0
 _CONFIG_ROLLBACK_INTERVAL_S = 60.0
 _PNL_ATTRIBUTION_LOG_INTERVAL_S = 60.0
 
-# Default circuit-breaker settings
-_CIRCUIT_BREAKER_MAX_FAILURES = 5
-_CIRCUIT_BREAKER_COOLDOWN_S = 30.0
+# Circuit breaker constants moved to RiskWatchdog.
 
 
 class MarketMakerStrategy:
@@ -138,8 +137,7 @@ class MarketMakerStrategy:
         self._seen_trade_ids: deque = deque()
         self._seen_trade_ids_set: Set[int] = set()
 
-        # Circuit-breaker / halt state
-        self._circuit_open = False
+        # Halt state
         self._halt_mgr = QuoteHaltManager(
             market_name=settings.market_name,
             journal=journal,
@@ -150,7 +148,23 @@ class MarketMakerStrategy:
 
         self._rebuild_components()
 
-        self._funding_rate = Decimal("0")
+        self._risk_watchdog = RiskWatchdog(
+            settings=settings,
+            risk_mgr=risk_mgr,
+            orders=order_mgr,
+            halt_mgr=self._halt_mgr,
+            metrics=metrics,
+            journal=journal,
+            post_only=self._post_only,
+            drawdown_stop=self._drawdown_stop,
+            request_shutdown_fn=self._request_shutdown,
+        )
+        self._funding_mgr = FundingManager(
+            market_profile=str(settings.market_profile),
+            funding_bias_enabled=bool(settings.funding_bias_enabled),
+            funding_inventory_weight=settings.funding_inventory_weight,
+            funding_bias_cap_bps=settings.funding_bias_cap_bps,
+        )
         self._shutdown_reason = "shutdown"
 
         self._shutdown_event = asyncio.Event()
@@ -660,29 +674,19 @@ class MarketMakerStrategy:
             return pos <= 0
         return False
 
+    # ------------------------------------------------------------------
+    # Funding delegation — see FundingManager for full logic
+    # ------------------------------------------------------------------
+
     def _set_funding_rate(self, funding_rate: Decimal) -> None:
-        try:
-            value = Decimal(str(funding_rate))
-        except Exception:
-            return
-        if not value.is_finite():
-            return
-        self._funding_rate = value
+        self._funding_mgr.set_funding_rate(funding_rate)
 
     def _funding_bias_bps(self) -> Decimal:
-        if self._settings.market_profile != "crypto":
-            return Decimal("0")
-        if not self._settings.funding_bias_enabled:
-            return Decimal("0")
-        raw_bps = (
-            self._funding_rate
-            * Decimal("10000")
-            * self._settings.funding_inventory_weight
-        )
-        cap = max(Decimal("0"), self._settings.funding_bias_cap_bps)
-        if cap <= 0:
-            return raw_bps
-        return max(-cap, min(cap, raw_bps))
+        return self._funding_mgr.funding_bias_bps()
+
+    @property
+    def _funding_rate(self) -> Decimal:
+        return self._funding_mgr.funding_rate
 
     @staticmethod
     def _counter_trend_side(trend: TrendState) -> Optional[str]:
@@ -800,6 +804,10 @@ class MarketMakerStrategy:
             drawdown_pct_of_max_notional=self._settings.drawdown_stop_pct_of_max_notional,
             use_high_watermark=self._settings.drawdown_use_high_watermark,
         )
+        # Sync mutable refs into risk watchdog if it exists.
+        if hasattr(self, "_risk_watchdog"):
+            self._risk_watchdog._drawdown_stop = self._drawdown_stop
+            self._risk_watchdog._post_only = self._post_only
 
         # Fill quality tracker for markout analysis and auto-widening.
         self._fill_quality = FillQualityTracker(self._ob)
@@ -839,67 +847,24 @@ class MarketMakerStrategy:
         self._level_dynamic_safety_ticks = self._post_only.dynamic_safety_ticks
         self._level_imbalance_pause_until = self._guards._level_imbalance_pause_until
 
-    def _evaluate_drawdown_stop(self) -> bool:
-        state = self._drawdown_stop.evaluate(self._risk.get_session_pnl())
-        if not state.triggered:
-            return False
+    # ------------------------------------------------------------------
+    # Risk watchdog delegation — see RiskWatchdog for full logic
+    # ------------------------------------------------------------------
 
-        action = "cancel_all_flatten_terminate"
-        logger.error(
-            "DRAWDOWN STOP TRIGGERED: market=%s current_pnl=%s peak_pnl=%s drawdown=%s "
-            "threshold=%s action=%s",
-            self._settings.market_name,
-            state.current_pnl,
-            state.peak_pnl,
-            state.drawdown,
-            state.threshold_usd,
-            action,
-        )
-        self._journal.record_drawdown_stop(
-            current_pnl=state.current_pnl,
-            peak_pnl=state.peak_pnl,
-            drawdown=state.drawdown,
-            threshold_usd=state.threshold_usd,
-            action=action,
-        )
-        self._request_shutdown("drawdown_stop")
-        return True
+    @property
+    def _circuit_open(self) -> bool:
+        return self._risk_watchdog.circuit_open
+
+    def _evaluate_drawdown_stop(self) -> bool:
+        return self._risk_watchdog.evaluate_drawdown_stop()
 
     async def _drawdown_watchdog_task(self) -> None:
-        while not self._shutdown_event.is_set():
-            try:
-                if self._evaluate_drawdown_stop():
-                    return
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
-                logger.error("Drawdown watchdog error", exc_info=True)
-                self._journal.record_error(
-                    component="drawdown_watchdog",
-                    exception_type=type(exc).__name__,
-                    message=str(exc),
-                    stack_trace_hash=TradeJournal.make_stack_trace_hash(exc),
-                )
-            await asyncio.sleep(_DRAWDOWN_CHECK_INTERVAL_S)
+        await self._risk_watchdog.drawdown_watchdog_task(self._shutdown_event)
 
     async def _funding_refresh_task(self) -> None:
-        while not self._shutdown_event.is_set():
-            try:
-                if (
-                    self._settings.market_profile == "crypto"
-                    and self._settings.funding_bias_enabled
-                ):
-                    markets = await self._client.markets_info.get_markets_dict()
-                    market_info = markets.get(self._settings.market_name)
-                    if market_info is not None:
-                        self._set_funding_rate(
-                            Decimal(str(market_info.market_stats.funding_rate))
-                        )
-            except asyncio.CancelledError:
-                return
-            except Exception:
-                logger.debug("Funding refresh failed", exc_info=True)
-            await asyncio.sleep(_FUNDING_REFRESH_INTERVAL_S)
+        await self._funding_mgr.refresh_task(
+            self._client, self._settings.market_name, self._shutdown_event,
+        )
 
     async def _balance_refresh_task(self) -> None:
         """Periodically refresh available-for-trade collateral headroom."""
@@ -913,101 +878,10 @@ class MarketMakerStrategy:
             await asyncio.sleep(_BALANCE_REFRESH_INTERVAL_S)
 
     def _margin_guard_breach(self) -> tuple[bool, list[str], dict[str, Optional[Decimal]]]:
-        snapshot = self._risk.margin_snapshot()
-        reasons: list[str] = []
-
-        available = snapshot.get("available_for_trade")
-        equity = snapshot.get("equity")
-        initial_margin = snapshot.get("initial_margin")
-        available_ratio = snapshot.get("available_ratio")
-        margin_utilization = snapshot.get("margin_utilization")
-        liq_distance_bps = snapshot.get("liq_distance_bps")
-        current_position = self._risk.get_current_position()
-
-        if available is None:
-            reasons.append("available_for_trade_missing")
-        elif available < self._settings.min_available_balance_for_trading:
-            reasons.append("available_for_trade")
-
-        if self._settings.min_available_balance_ratio > 0:
-            if available_ratio is None or equity is None or equity <= 0:
-                reasons.append("available_ratio_missing")
-            elif available_ratio < self._settings.min_available_balance_ratio:
-                reasons.append("available_ratio")
-
-        if self._settings.max_margin_utilization > 0:
-            if margin_utilization is None or initial_margin is None or equity is None or equity <= 0:
-                reasons.append("margin_utilization_missing")
-            elif margin_utilization > self._settings.max_margin_utilization:
-                reasons.append("margin_utilization")
-
-        # Liquidation distance is only relevant while we hold risk.
-        if current_position != 0 and self._settings.min_liq_distance_bps > 0:
-            if liq_distance_bps is None:
-                reasons.append("liq_distance_missing")
-            elif liq_distance_bps < self._settings.min_liq_distance_bps:
-                reasons.append("liq_distance")
-
-        return bool(reasons), reasons, snapshot
+        return self._risk_watchdog.margin_guard_breach()
 
     async def _margin_guard_task(self) -> None:
-        while not self._shutdown_event.is_set():
-            try:
-                if not self._settings.margin_guard_enabled:
-                    await asyncio.sleep(_MARGIN_GUARD_CHECK_INTERVAL_S)
-                    continue
-
-                breached, reasons, snapshot = self._margin_guard_breach()
-                now = time.monotonic()
-                if breached:
-                    self._metrics.set_margin_guard_breached(True)
-                    self._set_quote_halt("margin_guard")
-                    if self._margin_breach_since is None:
-                        self._margin_breach_since = now
-                        self._journal.record_exchange_event(
-                            event_type="margin_guard_breach",
-                            details={
-                                "reasons": reasons,
-                                "snapshot": snapshot,
-                            },
-                        )
-                        if self._orders.active_order_count() > 0:
-                            await self._orders.cancel_all_orders()
-                    breach_elapsed = now - self._margin_breach_since
-                    if (
-                        self._settings.margin_guard_shutdown_breach_s > 0
-                        and breach_elapsed >= self._settings.margin_guard_shutdown_breach_s
-                    ):
-                        self._journal.record_exchange_event(
-                            event_type="margin_guard_shutdown",
-                            details={
-                                "reasons": reasons,
-                                "breach_elapsed_s": breach_elapsed,
-                                "snapshot": snapshot,
-                            },
-                        )
-                        self._request_shutdown("margin_guard")
-                        return
-                else:
-                    if self._margin_breach_since is not None:
-                        self._journal.record_exchange_event(
-                            event_type="margin_guard_cleared",
-                            details={"snapshot": snapshot},
-                        )
-                    self._margin_breach_since = None
-                    self._metrics.set_margin_guard_breached(False)
-                    self._clear_quote_halt("margin_guard")
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
-                logger.error("Margin guard task error: %s", exc, exc_info=True)
-                self._journal.record_error(
-                    component="margin_guard",
-                    exception_type=type(exc).__name__,
-                    message=str(exc),
-                    stack_trace_hash=TradeJournal.make_stack_trace_hash(exc),
-                )
-            await asyncio.sleep(_MARGIN_GUARD_CHECK_INTERVAL_S)
+        await self._risk_watchdog.margin_guard_task(self._shutdown_event)
 
     async def _kpi_watchdog_task(self) -> None:
         while not self._shutdown_event.is_set():
@@ -1286,82 +1160,8 @@ class MarketMakerStrategy:
             await asyncio.sleep(_POSITION_REFRESH_INTERVAL_S)
 
     # ------------------------------------------------------------------
-    # Circuit breaker
+    # Circuit breaker delegation — see RiskWatchdog for full logic
     # ------------------------------------------------------------------
 
     async def _circuit_breaker_task(self) -> None:
-        """Monitor consecutive failures, sweep pending cancels, and detect zombies."""
-        max_failures = self._settings.circuit_breaker_max_failures
-        cooldown = self._settings.circuit_breaker_cooldown_s
-        failure_window_s = self._settings.failure_window_s
-        failure_rate_trip = float(self._settings.failure_rate_trip)
-        min_attempts = self._settings.min_attempts_for_breaker
-
-        while not self._shutdown_event.is_set():
-            try:
-                # --- Sweep pending-cancel orders that timed out ---
-                self._orders.sweep_pending_cancels()
-
-                # --- Zombie order detection ---
-                zombie_threshold_s = self._settings.max_order_age_s * 2
-                if zombie_threshold_s > 0:
-                    zombies = self._orders.find_zombie_orders(zombie_threshold_s)
-                    for zombie in zombies:
-                        logger.warning(
-                            "Zombie order detected (no stream update in %.0fs): "
-                            "ext_id=%s exchange_id=%s side=%s level=%d — cancelling",
-                            time.monotonic() - zombie.placed_at,
-                            zombie.external_id,
-                            zombie.exchange_order_id,
-                            zombie.side,
-                            zombie.level,
-                        )
-                        await self._orders.cancel_order(zombie.external_id)
-
-                # --- POF-spread correlation update ---
-                placement_stats_60s = self._orders.failure_window_stats(60.0)
-                total_placements_60s = int(placement_stats_60s["attempts"])
-                self._post_only.update_pof_offset_boost(total_placements_60s)
-
-                # --- Failure rate circuit breaker ---
-                window_stats = self._orders.failure_window_stats(failure_window_s)
-                attempts = int(window_stats["attempts"])
-                failure_rate = float(window_stats["failure_rate"])
-                window_trip = (
-                    attempts >= min_attempts and failure_rate >= failure_rate_trip
-                )
-                if (
-                    not self._circuit_open
-                    and (
-                        self._orders.consecutive_failures >= max_failures
-                        or window_trip
-                    )
-                ):
-                    self._circuit_open = True
-                    self._metrics.circuit_open = True
-                    logger.warning(
-                        "CIRCUIT BREAKER OPEN: consecutive_failures=%d attempts=%d "
-                        "failure_rate=%.2f — pausing for %.0fs",
-                        self._orders.consecutive_failures,
-                        attempts,
-                        failure_rate,
-                        cooldown,
-                    )
-                    await asyncio.sleep(cooldown)
-                    self._orders.reset_failure_tracking()
-                    self._circuit_open = False
-                    self._metrics.circuit_open = False
-                    logger.info("Circuit breaker reset — resuming")
-                else:
-                    await asyncio.sleep(1.0)
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
-                logger.error("Circuit breaker task error: %s", exc)
-                self._journal.record_error(
-                    component="circuit_breaker",
-                    exception_type=type(exc).__name__,
-                    message=str(exc),
-                    stack_trace_hash=TradeJournal.make_stack_trace_hash(exc),
-                )
-                await asyncio.sleep(1.0)
+        await self._risk_watchdog.circuit_breaker_task(self._shutdown_event)

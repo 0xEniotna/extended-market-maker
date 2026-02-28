@@ -5,6 +5,7 @@ from decimal import ROUND_DOWN, ROUND_UP, Decimal
 from typing import Optional, cast
 
 from .types import OrderbookLike, PriceLevelLike, PricingSettingsLike, RiskManagerLike
+from .utils import safe_decimal, safe_float
 
 
 class PricingEngine:
@@ -16,6 +17,10 @@ class PricingEngine:
     Decimal precision is used only for final tick rounding and size
     quantisation — both exchange-critical operations.
     """
+
+    # Aliases for backward compatibility with callers using the static methods.
+    _to_decimal = staticmethod(safe_decimal)
+    _to_float = staticmethod(safe_float)
 
     def __init__(
         self,
@@ -33,20 +38,6 @@ class PricingEngine:
         self._tick_size_f = float(tick_size)
         self._base_order_size = base_order_size
         self._min_order_size_step = min_order_size_step
-
-    @staticmethod
-    def _to_decimal(value, default: str = "0") -> Decimal:
-        try:
-            return Decimal(str(value))
-        except Exception:
-            return Decimal(default)
-
-    @staticmethod
-    def _to_float(value, default: float = 0.0) -> float:
-        try:
-            return float(value)
-        except Exception:
-            return default
 
     def _offset_mode(self) -> str:
         mode = self._settings.offset_mode

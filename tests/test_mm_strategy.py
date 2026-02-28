@@ -758,12 +758,14 @@ class TestDrawdownStop:
         s._settings.drawdown_use_high_watermark = True
         from market_maker.drawdown_stop import DrawdownStop
 
-        s._drawdown_stop = DrawdownStop(
+        dd = DrawdownStop(
             enabled=s._settings.drawdown_stop_enabled,
             max_position_notional_usd=s._settings.max_position_notional_usd,
             drawdown_pct_of_max_notional=s._settings.drawdown_stop_pct_of_max_notional,
             use_high_watermark=s._settings.drawdown_use_high_watermark,
         )
+        s._drawdown_stop = dd
+        s._risk_watchdog._drawdown_stop = dd
 
         s._risk._total_pnl = Decimal("40")
         assert s._evaluate_drawdown_stop() is False
