@@ -33,7 +33,6 @@ def _ts_fmt(ts: float) -> str:
 
 
 def _event_mid(event: Dict[str, Any]) -> Optional[Decimal]:
-    """Return event mid-price if available from explicit mid or BBO."""
     if event.get("mid") is not None:
         return _d(event["mid"])
     if event.get("best_bid") is not None and event.get("best_ask") is not None:
@@ -61,7 +60,6 @@ def _mid_at_or_after(
     *,
     max_wait_s: float = 60.0,
 ) -> Optional[Decimal]:
-    """Return first observed mid at/after target_ts within max_wait_s."""
     if not ts_values:
         return None
     idx = bisect.bisect_left(ts_values, target_ts)
@@ -86,19 +84,10 @@ def _first_position(events: List[Dict[str, Any]]) -> Optional[Decimal]:
     return None
 
 
-# Expected schema version for analysis.
 _EXPECTED_SCHEMA_VERSION = 2
 
 
-def validate_schema_versions(
-    events: List[Dict[str, Any]],
-) -> Tuple[bool, List[str]]:
-    """Check that all events have the expected schema version.
-
-    Returns (all_valid, warnings).  If there are incompatible events, the
-    caller should print a warning and skip analysis sections that would
-    produce wrong numbers for those events.
-    """
+def validate_schema_versions(events: List[Dict[str, Any]]) -> Tuple[bool, List[str]]:
     warnings: List[str] = []
     version_counts: Dict[int, int] = Counter()
     for e in events:
@@ -106,36 +95,22 @@ def validate_schema_versions(
         if v is not None:
             version_counts[int(v)] += 1
         else:
-            version_counts[-1] += 1  # missing version
-
+            version_counts[-1] += 1
     all_valid = True
     for version, count in sorted(version_counts.items()):
         if version == -1:
-            warnings.append(
-                f"  {count} events have no schema_version (pre-v1 format)"
-            )
+            warnings.append(f"  {count} events have no schema_version (pre-v1 format)")
             all_valid = False
         elif version != _EXPECTED_SCHEMA_VERSION:
-            warnings.append(
-                f"  {count} events have schema_version={version} "
-                f"(expected {_EXPECTED_SCHEMA_VERSION})"
-            )
+            warnings.append(f"  {count} events have schema_version={version} (expected {_EXPECTED_SCHEMA_VERSION})")
             all_valid = False
     return all_valid, warnings
 
 
-def detect_heartbeat_gaps(
-    events: List[Dict[str, Any]],
-    max_gap_s: float = 60.0,
-) -> List[Dict[str, Any]]:
-    """Detect gaps > max_gap_s between consecutive heartbeat events.
-
-    Returns a list of gap records with start_ts, end_ts, gap_s.
-    """
+def detect_heartbeat_gaps(events: List[Dict[str, Any]], max_gap_s: float = 60.0) -> List[Dict[str, Any]]:
     heartbeats = [e for e in events if e.get("type") == "heartbeat"]
     if len(heartbeats) < 2:
         return []
-
     gaps: List[Dict[str, Any]] = []
     for i in range(1, len(heartbeats)):
         prev_ts = float(heartbeats[i - 1].get("ts", 0))
@@ -143,11 +118,8 @@ def detect_heartbeat_gaps(
         delta = curr_ts - prev_ts
         if delta > max_gap_s:
             gaps.append({
-                "start_ts": prev_ts,
-                "end_ts": curr_ts,
-                "gap_s": delta,
-                "start_iso": _ts_fmt(prev_ts),
-                "end_iso": _ts_fmt(curr_ts),
+                "start_ts": prev_ts, "end_ts": curr_ts, "gap_s": delta,
+                "start_iso": _ts_fmt(prev_ts), "end_iso": _ts_fmt(curr_ts),
             })
     return gaps
 
@@ -170,7 +142,7 @@ def find_latest_journal(dir_path: Path) -> Path:
     return files[-1]
 
 
-_MARKOUT_HORIZONS = [0.25, 1.0, 5.0, 30.0, 120.0]  # seconds
+_MARKOUT_HORIZONS = [0.25, 1.0, 5.0, 30.0, 120.0]
 
 
 def _horizon_label(horizon_s: float) -> str:
@@ -181,12 +153,7 @@ def _horizon_label(horizon_s: float) -> str:
     return f"{int(horizon_s)}s"
 
 
-def _markout_for_fill(
-    fill: Dict[str, Any],
-    horizon_s: float,
-    ts_values: List[float],
-    mid_values: List[Decimal],
-) -> Optional[Decimal]:
+def _markout_for_fill(fill, horizon_s, ts_values, mid_values) -> Optional[Decimal]:
     fill_ts = float(fill.get("ts", 0.0))
     fill_px = _d(fill.get("price"))
     if fill_px <= 0:
@@ -200,172 +167,115 @@ def _markout_for_fill(
     return (fill_px - fut_mid) / fill_px * Decimal("10000")
 
 
-def _fill_context_value(fill: Dict[str, Any], key: str) -> Optional[Decimal]:
+def _fill_context_value(fill, key):
     snap = fill.get("market_snapshot")
     if isinstance(snap, dict):
         value = snap.get(key)
         if value is not None:
             return _d(value)
-    # Backward-compatible fallback for spread.
     if key == "spread_bps" and fill.get("spread_bps") is not None:
         return _d(fill.get("spread_bps"))
     return None
 
 
-def _bucket_spread(spread_bps: Optional[Decimal]) -> Optional[str]:
-    if spread_bps is None:
-        return None
-    if spread_bps < Decimal("2"):
-        return "<2"
-    if spread_bps < Decimal("5"):
-        return "2-5"
-    if spread_bps < Decimal("10"):
-        return "5-10"
+def _bucket_spread(v):
+    if v is None: return None
+    if v < Decimal("2"): return "<2"
+    if v < Decimal("5"): return "2-5"
+    if v < Decimal("10"): return "5-10"
     return ">10"
 
 
-def _bucket_micro_vol(micro_vol_bps: Optional[Decimal]) -> Optional[str]:
-    if micro_vol_bps is None:
-        return None
-    if micro_vol_bps < Decimal("2"):
-        return "<2"
-    if micro_vol_bps < Decimal("5"):
-        return "2-5"
+def _bucket_micro_vol(v):
+    if v is None: return None
+    if v < Decimal("2"): return "<2"
+    if v < Decimal("5"): return "2-5"
     return ">5"
 
 
-def _bucket_drift(micro_drift_bps: Optional[Decimal]) -> Optional[str]:
-    if micro_drift_bps is None:
-        return None
-    if micro_drift_bps < Decimal("-1"):
-        return "negative"
-    if micro_drift_bps > Decimal("1"):
-        return "positive"
+def _bucket_drift(v):
+    if v is None: return None
+    if v < Decimal("-1"): return "negative"
+    if v > Decimal("1"): return "positive"
     return "neutral"
 
 
-def _bucket_imbalance(imbalance: Optional[Decimal]) -> Optional[str]:
-    if imbalance is None:
-        return None
-    if imbalance < Decimal("-0.30"):
-        return "ask-heavy"
-    if imbalance > Decimal("0.30"):
-        return "bid-heavy"
+def _bucket_imbalance(v):
+    if v is None: return None
+    if v < Decimal("-0.30"): return "ask-heavy"
+    if v > Decimal("0.30"): return "bid-heavy"
     return "balanced"
 
 
-def _format_avg(values: List[Decimal]) -> str:
+def _format_avg(values):
     if not values:
         return "n/a"
     return f"{(sum(values) / Decimal(len(values))):.2f}"
 
 
-def _avg(values: List[Decimal]) -> Optional[Decimal]:
+def _avg(values):
     if not values:
         return None
     return sum(values) / Decimal(len(values))
 
 
-def _to_jsonable(v: Any) -> Any:
-    if isinstance(v, Decimal):
-        return str(v)
-    if isinstance(v, dict):
-        return {k: _to_jsonable(val) for k, val in v.items()}
-    if isinstance(v, list):
-        return [_to_jsonable(x) for x in v]
+def _to_jsonable(v):
+    if isinstance(v, Decimal): return str(v)
+    if isinstance(v, dict): return {k: _to_jsonable(val) for k, val in v.items()}
+    if isinstance(v, list): return [_to_jsonable(x) for x in v]
     return v
 
 
-def build_summary(
-    events: List[Dict[str, Any]],
-    path: Path,
-    assumed_fee_bps: Optional[Decimal],
-) -> Dict[str, Any]:
+def build_summary(events, path, assumed_fee_bps):
     fills = [e for e in events if e.get("type") == "fill"]
     orders = [e for e in events if e.get("type") == "order_placed"]
     snapshots = [e for e in events if e.get("type") == "snapshot"]
     ts_values, mid_values = _build_mid_series(events)
-
     market = events[0].get("market", "?") if events else "?"
     start_ts = float(events[0].get("ts", 0.0)) if events else None
     end_ts = float(events[-1].get("ts", 0.0)) if events else None
-    duration_s = (end_ts - start_ts) if (start_ts is not None and end_ts is not None) else 0.0
-
+    duration_s = (end_ts - start_ts) if (start_ts and end_ts) else 0.0
     edge_values = [_d(f.get("edge_bps")) for f in fills if f.get("edge_bps") is not None]
     adverse_fill_count = sum(1 for v in edge_values if v < 0)
-    adverse_fill_ratio = (
-        Decimal(adverse_fill_count) / Decimal(len(edge_values))
-        if edge_values
-        else None
-    )
-
-    markout_values: Dict[float, List[Decimal]] = {h: [] for h in _MARKOUT_HORIZONS}
+    adverse_fill_ratio = Decimal(adverse_fill_count) / Decimal(len(edge_values)) if edge_values else None
+    markout_values = {h: [] for h in _MARKOUT_HORIZONS}
     for fill in fills:
-        for horizon in markout_values.keys():
-            m = _markout_for_fill(fill, float(horizon), ts_values, mid_values)
+        for h in markout_values:
+            m = _markout_for_fill(fill, float(h), ts_values, mid_values)
             if m is not None:
-                markout_values[horizon].append(m)
-
-    fill_rate_pct = None
-    if orders:
-        fill_rate_pct = Decimal(len(fills)) / Decimal(len(orders)) * Decimal("100")
+                markout_values[h].append(m)
+    fill_rate_pct = Decimal(len(fills)) / Decimal(len(orders)) * Decimal("100") if orders else None
     taker_count = sum(1 for f in fills if f.get("is_taker"))
-    taker_notional = sum(
-        _d(f.get("qty")) * _d(f.get("price"))
-        for f in fills
-        if f.get("is_taker")
-    )
+    taker_notional = sum(_d(f.get("qty")) * _d(f.get("price")) for f in fills if f.get("is_taker"))
     total_notional = sum(_d(f.get("qty")) * _d(f.get("price")) for f in fills)
-    taker_notional_ratio = (
-        taker_notional / total_notional if total_notional > 0 else Decimal("0")
-    )
-    quote_lifetimes_ms = [
-        _d(f.get("quote_lifetime_ms"))
-        for f in fills
-        if f.get("quote_lifetime_ms") is not None
-    ]
-
+    taker_notional_ratio = taker_notional / total_notional if total_notional > 0 else Decimal("0")
+    quote_lifetimes = [_d(f.get("quote_lifetime_ms")) for f in fills if f.get("quote_lifetime_ms") is not None]
     return {
-        "market": market,
-        "journal_file": str(path),
-        "assumed_fee_bps": assumed_fee_bps,
-        "counts": {
-            "events": len(events),
-            "fills": len(fills),
-            "orders": len(orders),
-            "snapshots": len(snapshots),
-        },
-        "window": {
-            "start_ts": start_ts,
-            "end_ts": end_ts,
-            "start_iso": _ts_fmt(start_ts) if start_ts is not None else None,
-            "end_iso": _ts_fmt(end_ts) if end_ts is not None else None,
-            "duration_s": duration_s,
-        },
+        "market": market, "journal_file": str(path), "assumed_fee_bps": assumed_fee_bps,
+        "counts": {"events": len(events), "fills": len(fills), "orders": len(orders), "snapshots": len(snapshots)},
+        "window": {"start_ts": start_ts, "end_ts": end_ts, "start_iso": _ts_fmt(start_ts) if start_ts else None,
+                    "end_iso": _ts_fmt(end_ts) if end_ts else None, "duration_s": duration_s},
         "metrics": {
-            "fill_rate_pct": fill_rate_pct,
-            "avg_edge_bps": _avg(edge_values),
-            "adverse_fill_count": adverse_fill_count,
-            "adverse_fill_ratio": adverse_fill_ratio,
+            "fill_rate_pct": fill_rate_pct, "avg_edge_bps": _avg(edge_values),
+            "adverse_fill_count": adverse_fill_count, "adverse_fill_ratio": adverse_fill_ratio,
             "final_position": _latest_position(events),
-            "markout_250ms_bps": _avg(markout_values[0.25]),
-            "markout_1s_bps": _avg(markout_values[1.0]),
-            "markout_5s_bps": _avg(markout_values[5.0]),
-            "markout_30s_bps": _avg(markout_values[30.0]),
+            "markout_250ms_bps": _avg(markout_values[0.25]), "markout_1s_bps": _avg(markout_values[1.0]),
+            "markout_5s_bps": _avg(markout_values[5.0]), "markout_30s_bps": _avg(markout_values[30.0]),
             "markout_2m_bps": _avg(markout_values[120.0]),
-            "markout_counts": {
-                _horizon_label(h): len(markout_values[h])
-                for h in _MARKOUT_HORIZONS
-            },
-            "taker_fill_count": taker_count,
-            "taker_fill_notional_ratio": taker_notional_ratio,
-            "quote_lifetime_ms_avg": _avg(quote_lifetimes_ms),
-            "quote_lifetime_ms_count": len(quote_lifetimes_ms),
+            "markout_counts": {_horizon_label(h): len(markout_values[h]) for h in _MARKOUT_HORIZONS},
+            "taker_fill_count": taker_count, "taker_fill_notional_ratio": taker_notional_ratio,
+            "quote_lifetime_ms_avg": _avg(quote_lifetimes), "quote_lifetime_ms_count": len(quote_lifetimes),
         },
     }
 
 
-def analyse(events: List[Dict[str, Any]], path: Path, assumed_fee_bps: Optional[Decimal]) -> str:
+def analyse(events, path, assumed_fee_bps):
+    from journal_analysis_sections import (
+        build_fill_section,
+        build_order_section,
+        build_reprice_section,
+    )
+
     fills = [e for e in events if e["type"] == "fill"]
     orders = [e for e in events if e["type"] == "order_placed"]
     reprice_decisions = [e for e in events if e["type"] == "reprice_decision"]
@@ -390,7 +300,6 @@ def analyse(events: List[Dict[str, Any]], path: Path, assumed_fee_bps: Optional[
                  f"({len(fills)} fills, {len(orders)} placements, {len(snapshots)} snapshots)")
     lines.append("")
 
-    # ── Schema version validation ──
     schema_valid, schema_warnings = validate_schema_versions(events)
     if not schema_valid:
         lines.append("## Schema Warnings")
@@ -399,496 +308,28 @@ def analyse(events: List[Dict[str, Any]], path: Path, assumed_fee_bps: Optional[
         lines.append("  Some analysis sections may be inaccurate for incompatible events.")
         lines.append("")
 
-    # ── Heartbeat gap detection ──
     hb_gaps = detect_heartbeat_gaps(events)
     if hb_gaps:
         lines.append("## Heartbeat Gaps (potential outages)")
         for gap in hb_gaps:
-            lines.append(
-                f"  {gap['start_iso']} → {gap['end_iso']}  "
-                f"({gap['gap_s']:.0f}s gap)"
-            )
+            lines.append(f"  {gap['start_iso']} → {gap['end_iso']}  ({gap['gap_s']:.0f}s gap)")
         lines.append("")
 
-    # ── Fill analysis ──
-    if fills:
-        lines.append("## Fills")
-        buy_fills = [f for f in fills if f["side"] in ("BUY", "OrderSide.BUY")]
-        sell_fills = [f for f in fills if f["side"] in ("SELL", "OrderSide.SELL")]
-        total_buy_qty = sum(_d(f["qty"]) for f in buy_fills)
-        total_sell_qty = sum(_d(f["qty"]) for f in sell_fills)
-        total_buy_notional = sum(_d(f["qty"]) * _d(f["price"]) for f in buy_fills)
-        total_sell_notional = sum(_d(f["qty"]) * _d(f["price"]) for f in sell_fills)
-        reported_fees = sum(_d(f["fee"]) for f in fills)
-        fill_notional = sum(_d(f["qty"]) * _d(f["price"]) for f in fills)
-        assumed_fees = Decimal("0")
-        if assumed_fee_bps is not None:
-            assumed_fees = fill_notional * assumed_fee_bps / Decimal("10000")
-        taker_count = sum(1 for f in fills if f.get("is_taker"))
-        maker_count = len(fills) - taker_count
-        taker_notional = sum(
-            _d(f["qty"]) * _d(f["price"]) for f in fills if f.get("is_taker")
-        )
-        taker_notional_ratio = (
-            taker_notional / fill_notional if fill_notional > 0 else Decimal("0")
-        )
-        quote_lifetimes_ms = [
-            _d(f.get("quote_lifetime_ms"))
-            for f in fills
-            if f.get("quote_lifetime_ms") is not None
-        ]
+    lines.extend(build_fill_section(fills, events, ts_values, mid_values, assumed_fee_bps))
+    lines.extend(build_order_section(orders, fills, rejections, cancellations, duration_m))
+    lines.extend(build_reprice_section(reprice_decisions))
 
-        lines.append(f"  Total: {len(fills)} fills "
-                     f"({len(buy_fills)} buys, {len(sell_fills)} sells)")
-        lines.append(f"  Buy volume:  {total_buy_qty} contracts  "
-                     f"(${total_buy_notional:.2f} notional)")
-        lines.append(f"  Sell volume: {total_sell_qty} contracts  "
-                     f"(${total_sell_notional:.2f} notional)")
-        lines.append(f"  Maker/Taker: {maker_count}/{taker_count}")
-        lines.append(f"  Taker notional ratio: {(taker_notional_ratio * Decimal('100')):.2f}%")
-        if quote_lifetimes_ms:
-            avg_lifetime = sum(quote_lifetimes_ms) / Decimal(len(quote_lifetimes_ms))
-            lines.append(f"  Quote lifetime-to-fill: avg={avg_lifetime:.1f}ms n={len(quote_lifetimes_ms)}")
-        lines.append(f"  Reported fees:  ${reported_fees:.4f}")
-        if assumed_fee_bps is not None:
-            lines.append(
-                f"  Assumed fees @{assumed_fee_bps}bps: ${assumed_fees:.4f}"
-            )
-
-        # Edge analysis (how far from mid were fills)
-        edges = [_d(f.get("edge_bps")) for f in fills if f.get("edge_bps") is not None]
-        if edges:
-            avg_edge = sum(edges) / len(edges)
-            min_edge = min(edges)
-            max_edge = max(edges)
-            neg_edges = [e for e in edges if e < 0]
-            lines.append(f"  Edge (vs mid): avg={avg_edge:.2f}bps  "
-                         f"min={min_edge:.2f}  max={max_edge:.2f}  "
-                         f"adverse={len(neg_edges)}/{len(edges)}")
-
-        # Spread at fill time
-        spreads_at_fill = [_d(f.get("spread_bps"))
-                           for f in fills if f.get("spread_bps") is not None]
-        if spreads_at_fill:
-            avg_spread = sum(spreads_at_fill) / len(spreads_at_fill)
-            lines.append(f"  Spread at fill: avg={avg_spread:.1f}bps")
-
-        # Per-level breakdown
-        by_level: Dict[str, list] = defaultdict(list)
-        for f in fills:
-            lvl = f.get("level")
-            key = f"L{lvl}" if lvl is not None else "L?"
-            by_level[key].append(f)
-        lines.append("  Per level:")
-        for lvl_key in sorted(by_level):
-            lvl_fills = by_level[lvl_key]
-            lvl_qty = sum(_d(f["qty"]) for f in lvl_fills)
-            lines.append(f"    {lvl_key}: {len(lvl_fills)} fills, {lvl_qty} qty")
-        unknown_level_fills = len(by_level.get("L?", []))
-        if unknown_level_fills:
-            lines.append(f"  Unknown level fills: {unknown_level_fills}/{len(fills)}")
-
-        # MTM decomposition:
-        # - Session MTM uses only inventory created by fills inside this journal.
-        # - Account MTM additionally includes PnL on inventory carried into this run.
-        cashflow = total_sell_notional - total_buy_notional
-        net_fill_qty = total_buy_qty - total_sell_qty
-        final_pos = _latest_position(events) or Decimal("0")
-        start_pos_obs = _first_position(events)
-        inferred_start_pos = final_pos - net_fill_qty
-        start_pos_for_carry = (
-            start_pos_obs if start_pos_obs is not None else inferred_start_pos
-        )
-        first_mid = mid_values[0] if mid_values else None
-        last_mid = mid_values[-1] if mid_values else None
-        session_inventory_mtm = (
-            net_fill_qty * last_mid if last_mid is not None else Decimal("0")
-        )
-        session_gross_mtm = cashflow + session_inventory_mtm
-        net_reported = session_gross_mtm - reported_fees
-        net_assumed = (
-            session_gross_mtm - assumed_fees if assumed_fee_bps is not None else None
-        )
-        carry_mtm = None
-        account_gross_mtm = None
-        if first_mid is not None and last_mid is not None:
-            carry_mtm = start_pos_for_carry * (last_mid - first_mid)
-            account_gross_mtm = session_gross_mtm + carry_mtm
-
-        lines.append(f"  Cashflow P&L:   ${cashflow:.4f}  (sell - buy notional)")
-        if last_mid is not None:
-            lines.append(
-                f"  Session Inventory MTM:  ${session_inventory_mtm:.4f}  "
-                f"(net fills {net_fill_qty} @ mid {last_mid})"
-            )
-        else:
-            lines.append(
-                "  Session Inventory MTM:  unavailable  "
-                f"(net fills {net_fill_qty}, no market mid)"
-            )
-        lines.append(f"  Gross MTM P&L:  ${session_gross_mtm:.4f}  (session fills only)")
-        if carry_mtm is not None and account_gross_mtm is not None:
-            lines.append(
-                f"  Carry MTM:      ${carry_mtm:.4f}  "
-                f"(start pos {start_pos_for_carry})"
-            )
-            lines.append(f"  Account MTM Δ:  ${account_gross_mtm:.4f}  (session + carry)")
-        lines.append(f"  Net MTM P&L:    ${net_reported:.4f}  (reported fees)")
-        if net_assumed is not None:
-            lines.append(
-                f"  Net MTM P&L:    ${net_assumed:.4f}  "
-                f"(assumed fees @{assumed_fee_bps}bps)"
-            )
-        if start_pos_obs is not None and start_pos_obs != inferred_start_pos:
-            lines.append(
-                f"  Start position note: first observed={start_pos_obs}, "
-                f"inferred_from_fills={inferred_start_pos}"
-            )
-        lines.append(f"  Final position: {final_pos}")
-
-        # Post-fill markouts measure short-horizon selection quality.
-        horizons = list(_MARKOUT_HORIZONS)
-        markouts: Dict[float, List[Decimal]] = {h: [] for h in horizons}
-        markout_coverage: Dict[float, int] = {h: 0 for h in horizons}
-        for fill in fills:
-            for h in horizons:
-                m = _markout_for_fill(fill, h, ts_values, mid_values)
-                if m is not None:
-                    markout_coverage[h] += 1
-                    markouts[h].append(m)
-
-        lines.append("  Markout (bps):")
-        for h in horizons:
-            vals = markouts[h]
-            label = _horizon_label(h)
-            if vals:
-                avg = sum(vals) / Decimal(len(vals))
-                lines.append(
-                    f"    +{label}: avg={avg:.2f}  min={min(vals):.2f}  "
-                    f"max={max(vals):.2f}  n={len(vals)}/{len(fills)}"
-                )
-            else:
-                lines.append(
-                    f"    +{label}: unavailable  n={markout_coverage[h]}/{len(fills)}"
-                )
-
-        def _conditioned_markout(
-            *,
-            side_filter: Optional[str] = None,
-            taker_filter: Optional[bool] = None,
-            horizon_s: float = 5.0,
-        ) -> List[Decimal]:
-            vals: List[Decimal] = []
-            for fill in fills:
-                side = str(fill.get("side", "")).upper()
-                is_taker = bool(fill.get("is_taker"))
-                if side_filter is not None and side_filter not in side:
-                    continue
-                if taker_filter is not None and taker_filter != is_taker:
-                    continue
-                m = _markout_for_fill(fill, horizon_s, ts_values, mid_values)
-                if m is not None:
-                    vals.append(m)
-            return vals
-
-        lines.append("  Markout +5s conditioned:")
-        for label, vals in [
-            ("maker", _conditioned_markout(taker_filter=False, horizon_s=5.0)),
-            ("taker", _conditioned_markout(taker_filter=True, horizon_s=5.0)),
-            ("buy", _conditioned_markout(side_filter="BUY", horizon_s=5.0)),
-            ("sell", _conditioned_markout(side_filter="SELL", horizon_s=5.0)),
-            ("buy-maker", _conditioned_markout(side_filter="BUY", taker_filter=False, horizon_s=5.0)),
-            ("buy-taker", _conditioned_markout(side_filter="BUY", taker_filter=True, horizon_s=5.0)),
-            ("sell-maker", _conditioned_markout(side_filter="SELL", taker_filter=False, horizon_s=5.0)),
-            ("sell-taker", _conditioned_markout(side_filter="SELL", taker_filter=True, horizon_s=5.0)),
-        ]:
-            if vals:
-                lines.append(f"    {label}: avg={(sum(vals) / Decimal(len(vals))):.2f}bps n={len(vals)}")
-            else:
-                lines.append(f"    {label}: n=0")
-        lines.append("  Level toxicity (+5s markout):")
-        for lvl_key in sorted(by_level):
-            lvl_fills = by_level[lvl_key]
-            lvl_markouts_5s: List[Decimal] = [
-                m for fill in lvl_fills
-                for m in [_markout_for_fill(fill, 5.0, ts_values, mid_values)]
-                if m is not None
-            ]
-            if lvl_markouts_5s:
-                adverse = sum(1 for v in lvl_markouts_5s if v < 0)
-                avg_m5 = sum(lvl_markouts_5s) / Decimal(len(lvl_markouts_5s))
-                lines.append(
-                    f"    {lvl_key}: avg_mo5={avg_m5:.2f}bps adverse={adverse}/{len(lvl_markouts_5s)}"
-                )
-            else:
-                lines.append(f"    {lvl_key}: mo5 unavailable")
-
-        # Snapshot data completeness (schema v2 fill snapshots)
-        snapshot_present = 0
-        depth_complete = 0
-        for f in fills:
-            snap = f.get("market_snapshot")
-            if not isinstance(snap, dict):
-                continue
-            snapshot_present += 1
-            bids_top = snap.get("bids_top")
-            asks_top = snap.get("asks_top")
-            if isinstance(bids_top, list) and isinstance(asks_top, list):
-                if len(bids_top) >= 5 and len(asks_top) >= 5:
-                    depth_complete += 1
-        lines.append("  Data completeness:")
-        lines.append(
-            "    fill_snapshot_present: "
-            f"{snapshot_present}/{len(fills)} ({(Decimal(snapshot_present) / Decimal(len(fills)) * Decimal('100')):.1f}%)"
-        )
-        lines.append(
-            "    fill_snapshot_top5_complete: "
-            f"{depth_complete}/{len(fills)} ({(Decimal(depth_complete) / Decimal(len(fills)) * Decimal('100')):.1f}%)"
-        )
-        lines.append("")
-
-        # Context/regime buckets from fill snapshots
-        lines.append("## Context Regime Analysis")
-        contexts = {
-            "spread_bps": (
-                _bucket_spread,
-                ["<2", "2-5", "5-10", ">10"],
-                "Spread bucket (bps)",
-            ),
-            "micro_vol_bps": (
-                _bucket_micro_vol,
-                ["<2", "2-5", ">5"],
-                "Micro-vol bucket (bps)",
-            ),
-            "micro_drift_bps": (
-                _bucket_drift,
-                ["negative", "neutral", "positive"],
-                "Drift bucket",
-            ),
-            "imbalance": (
-                _bucket_imbalance,
-                ["ask-heavy", "balanced", "bid-heavy"],
-                "Imbalance bucket",
-            ),
-        }
-        for context_key, (bucket_fn, bucket_order, title) in contexts.items():
-            lines.append(f"  {title}:")
-            for bucket in bucket_order:
-                subset = [
-                    f for f in fills
-                    if bucket_fn(_fill_context_value(f, context_key)) == bucket
-                ]
-                if not subset:
-                    lines.append(f"    {bucket}: n=0")
-                    continue
-
-                edges = [
-                    _d(f.get("edge_bps"))
-                    for f in subset
-                    if f.get("edge_bps") is not None
-                ]
-                mo = {h: [] for h in _MARKOUT_HORIZONS}
-                for f in subset:
-                    for h in _MARKOUT_HORIZONS:
-                        m = _markout_for_fill(f, float(h), ts_values, mid_values)
-                        if m is not None:
-                            mo[h].append(m)
-                adverse_5 = sum(1 for v in mo[5.0] if v < 0)
-                adverse_5_pct = (
-                    Decimal(adverse_5) / Decimal(len(mo[5.0])) * Decimal("100")
-                    if mo[5.0] else Decimal("0")
-                )
-                cashflow_bucket = Decimal("0")
-                for f in subset:
-                    qty = _d(f.get("qty"))
-                    px = _d(f.get("price"))
-                    side = str(f.get("side", ""))
-                    if "SELL" in side:
-                        cashflow_bucket += qty * px
-                    else:
-                        cashflow_bucket -= qty * px
-
-                lines.append(
-                    f"    {bucket}: n={len(subset)} "
-                    f"avg_edge={_format_avg(edges)}bps "
-                    f"mo250ms={_format_avg(mo[0.25])}bps "
-                    f"mo1s={_format_avg(mo[1.0])}bps "
-                    f"mo5s={_format_avg(mo[5.0])}bps "
-                    f"mo30s={_format_avg(mo[30.0])}bps "
-                    f"mo2m={_format_avg(mo[120.0])}bps "
-                    f"adverse5={adverse_5_pct:.1f}% "
-                    f"cashflow=${cashflow_bucket:.2f}"
-                )
-        lines.append("")
-
-        # Chronological fill log (last 20)
-        lines.append("## Recent Fills (last 20)")
-        for f in fills[-20:]:
-            side_char = "B" if "BUY" in str(f["side"]) else "S"
-            edge_str = ""
-            if f.get("edge_bps") is not None:
-                edge_str = f" edge={_d(f['edge_bps']):+.1f}bps"
-            spread_str = ""
-            if f.get("spread_bps") is not None:
-                spread_str = f" spread={_d(f['spread_bps']):.1f}bps"
-            # T+5s markout for each fill
-            markout_str = ""
-            mo = _markout_for_fill(f, 5.0, ts_values, mid_values)
-            if mo is not None:
-                markout_str = f" mo5={mo:+.1f}bps"
-            taker_str = "T" if f.get("is_taker") else "M"
-            lines.append(
-                f"  {_ts_fmt(f['ts'])} {side_char} {f['qty']}@{f['price']} "
-                f"fee={f['fee']} [{taker_str}]{edge_str}{spread_str}{markout_str}"
-            )
-        lines.append("")
-    else:
-        lines.append("## Fills: NONE")
-        lines.append("")
-
-    # ── Order placement analysis ──
-    if orders:
-        lines.append("## Order Placements")
-        lines.append(f"  Total: {len(orders)}")
-        rate = len(orders) / max(duration_m, 1)
-        lines.append(f"  Rate: {rate:.1f}/min")
-
-        spreads_at_place = [_d(o.get("spread_bps"))
-                            for o in orders if o.get("spread_bps") is not None]
-        if spreads_at_place:
-            avg_spread = sum(spreads_at_place) / len(spreads_at_place)
-            lines.append(f"  Avg spread at placement: {avg_spread:.1f}bps")
-
-        # Offset from best (how far our orders were placed from BBO)
-        offsets: list[Decimal] = []
-        for o in orders:
-            price = _d(o["price"])
-            if "BUY" in str(o["side"]) and o.get("best_bid"):
-                offsets.append((_d(o["best_bid"]) - price) / _d(o["best_bid"]) * 10000)
-            elif "SELL" in str(o["side"]) and o.get("best_ask"):
-                offsets.append((price - _d(o["best_ask"])) / _d(o["best_ask"]) * 10000)
-        if offsets:
-            avg_off = sum(offsets) / len(offsets)
-            lines.append(f"  Avg offset from BBO: {avg_off:.1f}bps")
-
-        reject_rate = Decimal("0")
-        pof_count = 0
-        if rejections:
-            reject_rate = Decimal(len(rejections)) / Decimal(len(orders)) * Decimal("100")
-            pof_count = sum(
-                1
-                for r in rejections
-                if "POST_ONLY" in str(r.get("reason", "")).upper()
-            )
-            pof_rate = Decimal(pof_count) / Decimal(len(orders)) * Decimal("100")
-            lines.append(
-                f"  Rejections: {len(rejections)} ({reject_rate:.2f}% of placements)"
-            )
-            lines.append(
-                f"  Post-only rejects: {pof_count} ({pof_rate:.2f}% of placements)"
-            )
-        if cancellations:
-            cancel_rate = Decimal(len(cancellations)) / Decimal(len(orders)) * Decimal("100")
-            lines.append(
-                f"  Cancellations: {len(cancellations)} ({cancel_rate:.2f}% of placements)"
-            )
-        lines.append("")
-    else:
-        lines.append("## Order Placements: NONE")
-        lines.append("")
-
-    # ── Reprice decision telemetry ──
-    if reprice_decisions:
-        lines.append("## Reprice Decisions")
-        total = len(reprice_decisions)
-        lines.append(f"  Total: {total}")
-
-        reason_counts = Counter(
-            str(event.get("reason") or "unknown")
-            for event in reprice_decisions
-        )
-        lines.append("  Reasons:")
-        for reason, count in reason_counts.most_common(12):
-            pct = Decimal(count) / Decimal(total) * Decimal("100")
-            lines.append(f"    {reason}: {count} ({pct:.1f}%)")
-
-        skip_toxicity = reason_counts.get("skip_toxicity", 0)
-        toxicity_pct = Decimal(skip_toxicity) / Decimal(total) * Decimal("100")
-        lines.append(
-            f"  skip_toxicity share: {skip_toxicity}/{total} ({toxicity_pct:.1f}%)"
-        )
-
-        regime_counts = Counter(
-            str(event.get("regime"))
-            for event in reprice_decisions
-            if event.get("regime") is not None
-        )
-        if regime_counts:
-            lines.append("  Regimes:")
-            for regime, count in regime_counts.most_common():
-                pct = Decimal(count) / Decimal(total) * Decimal("100")
-                lines.append(f"    {regime}: {count} ({pct:.1f}%)")
-
-        trend_counts = Counter(
-            str(event.get("trend_direction"))
-            for event in reprice_decisions
-            if event.get("trend_direction") is not None
-        )
-        if trend_counts:
-            lines.append("  Trend directions:")
-            for direction, count in trend_counts.most_common():
-                pct = Decimal(count) / Decimal(total) * Decimal("100")
-                lines.append(f"    {direction}: {count} ({pct:.1f}%)")
-
-        band_counts = Counter(
-            str(event.get("inventory_band"))
-            for event in reprice_decisions
-            if event.get("inventory_band") is not None
-        )
-        if band_counts:
-            lines.append("  Inventory bands:")
-            for band, count in band_counts.most_common():
-                pct = Decimal(count) / Decimal(total) * Decimal("100")
-                lines.append(f"    {band}: {count} ({pct:.1f}%)")
-
-        trend_strengths = [
-            _d(event.get("trend_strength"))
-            for event in reprice_decisions
-            if event.get("trend_strength") is not None
-        ]
-        if trend_strengths:
-            avg_strength = sum(trend_strengths) / Decimal(len(trend_strengths))
-            lines.append(f"  Avg trend strength: {avg_strength:.3f}")
-
-        funding_bias_values = [
-            _d(event.get("funding_bias_bps"))
-            for event in reprice_decisions
-            if event.get("funding_bias_bps") is not None
-        ]
-        if funding_bias_values:
-            avg_funding_bias = sum(funding_bias_values) / Decimal(
-                len(funding_bias_values)
-            )
-            lines.append(f"  Avg funding bias: {avg_funding_bias:.2f}bps")
-        lines.append("")
-
-    # ── Spread over time (from snapshots) ──
     if snapshots:
         lines.append("## Spread Over Time (from snapshots)")
-        spreads = [_d(s.get("spread_bps"))
-                   for s in snapshots if s.get("spread_bps") is not None]
+        spreads = [_d(s.get("spread_bps")) for s in snapshots if s.get("spread_bps") is not None]
         if spreads:
-            avg = sum(spreads) / len(spreads)
-            lines.append(f"  Samples: {len(spreads)}  "
-                         f"avg={avg:.1f}bps  min={min(spreads):.1f}  max={max(spreads):.1f}")
-
-        # Position evolution
+            lines.append(f"  Samples: {len(spreads)}  avg={sum(spreads) / len(spreads):.1f}bps  "
+                         f"min={min(spreads):.1f}  max={max(spreads):.1f}")
         positions = [_d(s.get("position")) for s in snapshots]
         if positions:
             lines.append(f"  Position range: [{min(positions)}, {max(positions)}]")
         lines.append("")
 
-    # ── Conversion ratio ──
     if orders and fills:
         ratio = len(fills) / len(orders) * 100
         lines.append(f"## Fill Rate: {ratio:.1f}%  ({len(fills)} fills / {len(orders)} orders)")
@@ -902,17 +343,8 @@ def main() -> None:
         description="Analyse market-maker journal JSONL and produce a shareable report.",
     )
     parser.add_argument("target", help="Journal file or directory containing mm_*.jsonl")
-    parser.add_argument(
-        "--assumed-fee-bps",
-        type=Decimal,
-        default=None,
-        help="Optional fee assumption per side in bps for stress-testing net MTM P&L",
-    )
-    parser.add_argument(
-        "--json-out",
-        default=None,
-        help="Optional path to write structured JSON summary.",
-    )
+    parser.add_argument("--assumed-fee-bps", type=Decimal, default=None)
+    parser.add_argument("--json-out", default=None)
     args = parser.parse_args()
 
     target = Path(args.target)
@@ -922,7 +354,6 @@ def main() -> None:
     print(f"Analysing: {target}\n")
     events = load_journal(target)
 
-    # Top-level schema check before analysis
     schema_valid, schema_warnings = validate_schema_versions(events)
     if not schema_valid:
         print("⚠ Schema version warnings:")
@@ -933,7 +364,6 @@ def main() -> None:
     report = analyse(events, target, args.assumed_fee_bps)
     print(report)
 
-    # Also write to .txt next to the journal
     report_path = target.with_suffix(".analysis.txt")
     report_path.write_text(report)
     print(f"\nReport saved to: {report_path}")

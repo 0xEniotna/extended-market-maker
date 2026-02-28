@@ -6,23 +6,12 @@ Main orchestration for the market making bot.  Spawns one async task per
 side of the book, computes the target price, and reprices its order when
 the current order drifts outside a tolerance band.
 
-Features:
-- Inventory-skewed pricing (Avellaneda-Stoikov style)
-- Real-time fill/order tracking via account WebSocket stream
-- Atomic cancel-and-replace via ``previous_order_id``
-- Minimum spread check to avoid quoting inside the fee
-- Circuit breaker on consecutive order-placement failures
-- Staleness detection on orderbook data
-
 Entry point: ``MarketMakerStrategy.run()``
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import subprocess
-import time
 from collections import deque
 from decimal import ROUND_DOWN, Decimal
 from typing import Any, Dict, Optional, Set
@@ -31,67 +20,43 @@ from x10.perpetual.orders import OrderSide
 from x10.perpetual.trading_client import PerpetualTradingClient
 
 from .account_stream import AccountStreamManager, FillEvent
-from .config import ENV_FILE, MarketMakerSettings
-from .config_rollback import ConfigRollbackWatchdog, PerformanceBaseline
-from .decision_models import RegimeState, RepriceMarketContext, TrendState
-from .drawdown_stop import DrawdownStop
-from .fill_quality import FillQualityTracker
+from .config import MarketMakerSettings
+from .decision_models import TrendState
 from .funding_manager import FundingManager
-from .guard_policy import GuardPolicy
-from .latency_monitor import LatencyMonitor
 from .metrics import MetricsCollector
 from .order_manager import OrderManager
 from .orderbook_manager import OrderbookManager
-from .pnl_attribution import PnLAttributionTracker
-from .post_only_safety import PostOnlySafety
-from .pricing_engine import PricingEngine
 from .quote_halt_manager import QuoteHaltManager
-from .quote_trade_ratio import QuoteTradeRatioTracker
-from .reprice_pipeline import RepricePipeline
 from .risk_manager import RiskManager
 from .risk_watchdog import RiskWatchdog
 from .strategy_callbacks import on_fill, on_level_freed
+from .strategy_components import (
+    estimate_tick_time_ms,
+    handle_reload,
+    rebuild_components,
+    sanitized_run_config,
+    toxicity_adjustment,
+)
+from .strategy_quoting import (
+    build_reprice_market_context,
+    cancel_level_order,
+    is_fatal_exception,
+    level_task,
+    normalise_side,
+    on_adverse_markout_widen,
+    on_stream_desync,
+    order_age_exceeded,
+    record_reprice_decision,
+    sync_quote_halt_state,
+)
 from .strategy_runner import run_strategy
 from .trade_journal import TradeJournal
-from .trend_signal import TrendSignal
-from .volatility_regime import VolatilityRegime
 
 logger = logging.getLogger(__name__)
 
-# Exception messages/types that indicate an irrecoverable error.
-# These should trigger a shutdown instead of endless 1-second retries.
-_FATAL_EXCEPTION_PATTERNS = frozenset({
-    "authentication",
-    "unauthorized",
-    "forbidden",
-    "api key",
-    "invalid key",
-    "permission denied",
-    "market not found",
-    "market delisted",
-    "account suspended",
-    "account disabled",
-})
-
-# Refresh the exchange position every N seconds as a safety net.
-# The account stream handles real-time updates; this is a fallback.
-_POSITION_REFRESH_INTERVAL_S = 30.0
-# Funding refresh interval moved to FundingManager.
-_BALANCE_REFRESH_INTERVAL_S = 10.0
-# Drawdown/margin guard intervals moved to RiskWatchdog.
-_KPI_WATCHDOG_INTERVAL_S = 5.0
-_QTR_EVALUATE_INTERVAL_S = 30.0
-_LATENCY_SLA_INTERVAL_S = 10.0
-_CONFIG_ROLLBACK_INTERVAL_S = 60.0
-_PNL_ATTRIBUTION_LOG_INTERVAL_S = 60.0
-
-# Circuit breaker constants moved to RiskWatchdog.
-
 
 class MarketMakerStrategy:
-    """
-    Market making strategy that quotes on multiple price levels per side.
-    """
+    """Market making strategy that quotes on multiple price levels per side."""
 
     def __init__(
         self,
@@ -124,16 +89,12 @@ class MarketMakerStrategy:
         # Keyed by (side_name, level)
         self._level_ext_ids: Dict[tuple[str, int], Optional[str]] = {}
         self._level_order_created_at: Dict[tuple[str, int], Optional[float]] = {}
-        # Reprice rate limiting: monotonic timestamp of last reprice per slot
         self._level_last_reprice_at: Dict[tuple[str, int], float] = {}
-        # Stale-book grace tracking by slot
         self._level_stale_since: Dict[tuple[str, int], Optional[float]] = {}
-        # Cancel barrier by slot: blocks re-placement until WS terminal update arrives.
         self._level_cancel_pending_ext_id: Dict[tuple[str, int], Optional[str]] = {}
-        # Cancel reason tracking for journaling once cancellation is confirmed
         self._pending_cancel_reasons: Dict[str, str] = {}
 
-        # Fill deduplication: ordered deque + fast lookup set, capped at 10k entries.
+        # Fill deduplication
         self._seen_trade_ids: deque = deque()
         self._seen_trade_ids_set: Set[int] = set()
 
@@ -166,107 +127,23 @@ class MarketMakerStrategy:
             funding_bias_cap_bps=settings.funding_bias_cap_bps,
         )
         self._shutdown_reason = "shutdown"
-
         self._shutdown_event = asyncio.Event()
-
-    # ------------------------------------------------------------------
-    # Class-level entry point
-    # ------------------------------------------------------------------
 
     @classmethod
     async def run(cls) -> None:
         await run_strategy(cls)
 
-    # ------------------------------------------------------------------
-    # Signal handler
-    # ------------------------------------------------------------------
-
     def _handle_signal(self) -> None:
         logger.info("Signal received, initiating shutdown")
         self._request_shutdown("shutdown")
 
-    # Keys that cannot be changed via SIGHUP because they are wired into
-    # components (WS streams, trading client, risk manager) at startup.
     _RELOAD_IMMUTABLE_KEYS = frozenset({
         "market_name", "environment", "vault_id", "api_key",
         "stark_private_key", "stark_public_key",
     })
 
     def _handle_reload(self) -> None:
-        """SIGHUP handler — reload config from environment / .env file."""
-        try:
-            old_config = self._sanitized_run_config(self._settings)
-            new_settings = MarketMakerSettings()
-            new_config = self._sanitized_run_config(new_settings)
-
-            # Guard: reject reload if immutable keys changed.
-            for key in self._RELOAD_IMMUTABLE_KEYS:
-                old_val = getattr(self._settings, key, None)
-                new_val = getattr(new_settings, key, None)
-                if str(old_val) != str(new_val):
-                    logger.error(
-                        "SIGHUP reload REJECTED: immutable key '%s' changed "
-                        "(%s -> %s) — restart required to apply this change",
-                        key, old_val, new_val,
-                    )
-                    return
-
-            # Compute diff: keys where values changed.
-            diff: Dict[str, Any] = {}
-            all_keys = set(old_config) | set(new_config)
-            for key in all_keys:
-                old_val = old_config.get(key)
-                new_val = new_config.get(key)
-                if str(old_val) != str(new_val):
-                    diff[key] = {"before": old_val, "after": new_val}
-
-            self._settings = new_settings
-            self._rebuild_components()
-
-            # Journal the config change event.
-            if hasattr(self, "_journal") and self._journal is not None:
-                self._journal.record_config_change(
-                    before=old_config,
-                    after=new_config,
-                    diff=diff,
-                )
-
-            # Notify config rollback watchdog.
-            if diff and hasattr(self, "_config_rollback"):
-                fq = getattr(self, "_fill_quality", None)
-                avg_markout_1s = Decimal("0")
-                if fq is not None:
-                    summary = fq.segmented_markout_summary("1s")
-                    avg_markout_1s = summary.avg_all
-                pnl_snap = self._pnl_attribution.snapshot()
-                baseline = PerformanceBaseline(
-                    captured_at=time.monotonic(),
-                    avg_markout_1s_bps=avg_markout_1s,
-                    fill_count=pnl_snap.fill_count,
-                    session_pnl_usd=self._risk.get_session_pnl(),
-                    avg_spread_capture_bps=pnl_snap.avg_spread_capture_bps,
-                )
-                self._config_rollback.on_config_change(old_config, new_config, baseline)
-
-            logger.info(
-                "Config reloaded: offset_mode=%s skew=%.2f spread_min=%s levels=%d max_age=%ss diff_keys=%s",
-                new_settings.offset_mode.value,
-                new_settings.inventory_skew_factor,
-                new_settings.min_spread_bps,
-                new_settings.num_price_levels,
-                new_settings.max_order_age_s,
-                list(diff.keys()) if diff else "none",
-            )
-        except Exception as exc:
-            logger.error("Config reload failed: %s", exc)
-            if hasattr(self, "_journal") and self._journal is not None:
-                self._journal.record_error(
-                    component="config_reload",
-                    exception_type=type(exc).__name__,
-                    message=str(exc),
-                    stack_trace_hash=TradeJournal.make_stack_trace_hash(exc),
-                    stack_trace=TradeJournal.format_stack_trace(exc),
-                )
+        handle_reload(self)
 
     @property
     def shutdown_reason(self) -> str:
@@ -274,51 +151,10 @@ class MarketMakerStrategy:
 
     @staticmethod
     def _sanitized_run_config(settings: MarketMakerSettings) -> Dict[str, Any]:
-        """Return a config snapshot safe to persist in journals."""
-        data: Dict[str, Any] = settings.model_dump(mode="python")
-        redact_keys = {
-            "vault_id",
-            "stark_private_key",
-            "stark_public_key",
-            "api_key",
-        }
-        for key in redact_keys:
-            if key in data:
-                data[key] = "***redacted***"
-        return data
-
-    @staticmethod
-    def _run_provenance() -> Dict[str, Any]:
-        """Best-effort runtime provenance for reproducibility."""
-        provenance: Dict[str, Any] = {
-            "env_file": str(ENV_FILE),
-            "cwd": os.getcwd(),
-        }
-        try:
-            res = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            sha = res.stdout.strip()
-            if res.returncode == 0 and sha:
-                provenance["git_sha"] = sha
-        except Exception:
-            # Keep provenance optional and never break strategy startup.
-            pass
-        return provenance
-
-    # ------------------------------------------------------------------
-    # Fill callback (from account stream → trade journal)
-    # ------------------------------------------------------------------
+        return sanitized_run_config(settings)
 
     def _on_fill(self, fill: FillEvent) -> None:
         on_fill(self, fill)
-
-    # ------------------------------------------------------------------
-    # Level-freed callback (from account stream → order manager)
-    # ------------------------------------------------------------------
 
     def _on_level_freed(
         self,
@@ -342,141 +178,24 @@ class MarketMakerStrategy:
             price=price,
         )
 
-    # ------------------------------------------------------------------
-    # Per-level task
-    # ------------------------------------------------------------------
-
     async def _level_task(self, side: OrderSide, level: int) -> None:
-        """Continuously quote on one (side, level) slot."""
-        key = (str(side), level)
-        self._clear_level_slot(key)
-
-        condition = (
-            self._ob.best_bid_condition
-            if side == OrderSide.BUY
-            else self._ob.best_ask_condition
-        )
-
-        while not self._shutdown_event.is_set():
-            self._sync_quote_halt_state()
-            # Pause while circuit breaker is open
-            if self._circuit_open:
-                await asyncio.sleep(1.0)
-                continue
-            if self._quote_halt_reasons:
-                await asyncio.sleep(0.2)
-                continue
-            if self._level_cancel_pending_ext_id.get(key) is not None:
-                await asyncio.sleep(0.1)
-                continue
-
-            try:
-                # Wait for a price change on this side of the book
-                async with condition:
-                    await asyncio.wait_for(condition.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                pass  # Re-evaluate anyway every few seconds
-            except asyncio.CancelledError:
-                return
-
-            try:
-                await self._maybe_reprice(side, level)
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
-                logger.error(
-                    "Error in level task %s L%d: %s", side, level, exc,
-                    exc_info=True,
-                )
-                self._journal.record_error(
-                    component=f"level_task_{side}_L{level}",
-                    exception_type=type(exc).__name__,
-                    message=str(exc),
-                    stack_trace_hash=TradeJournal.make_stack_trace_hash(exc),
-                    stack_trace=TradeJournal.format_stack_trace(exc),
-                )
-                if self._is_fatal_exception(exc):
-                    logger.critical(
-                        "FATAL error in level task %s L%d — initiating shutdown: %s",
-                        side, level, exc,
-                    )
-                    self._shutdown_event.set()
-                    return
-                await asyncio.sleep(1.0)
-
-    # ------------------------------------------------------------------
-    # Repricing logic
-    # ------------------------------------------------------------------
+        await level_task(self, side, level)
 
     async def _maybe_reprice(self, side: OrderSide, level: int) -> None:
-        self._sync_quote_halt_state()
+        sync_quote_halt_state(self)
         if self._quote_halt_reasons:
             return
-        market_ctx = self._build_reprice_market_context()
+        market_ctx = build_reprice_market_context(self)
         await self._reprice.evaluate(self, side, level, market_ctx=market_ctx)
 
-    def _build_reprice_market_context(self) -> RepriceMarketContext:
-        if self._settings.market_profile == "crypto":
-            regime = self._volatility.evaluate()
-            trend = self._trend_signal.evaluate()
-        else:
-            regime = RegimeState(regime="NORMAL")
-            trend = TrendState()
-        min_interval, max_order_age_s = self._volatility.cadence(regime)
-        rate_limit_multiplier = getattr(self._orders, "rate_limit_reprice_multiplier", Decimal("1"))
-        if not isinstance(rate_limit_multiplier, Decimal):
-            rate_limit_multiplier = Decimal("1")
-        min_interval *= float(rate_limit_multiplier)
-        return RepriceMarketContext(
-            regime=regime,
-            trend=trend,
-            min_reprice_interval_s=min_interval,
-            max_order_age_s=max_order_age_s,
-            funding_bias_bps=self._funding_bias_bps(),
-            inventory_band=self._pricing.inventory_band(),
-        )
-
     def _clear_level_slot(self, key: tuple[str, int]) -> None:
-        """Clear tracking for one (side, level) slot."""
         self._level_ext_ids[key] = None
         self._level_order_created_at[key] = None
         self._level_stale_since[key] = None
         self._level_cancel_pending_ext_id[key] = None
 
-    def _record_reprice_decision(
-        self,
-        *,
-        side: OrderSide,
-        level: int,
-        reason: str,
-        current_best: Optional[Decimal] = None,
-        prev_price: Optional[Decimal] = None,
-        target_price: Optional[Decimal] = None,
-        spread_bps: Optional[Decimal] = None,
-        extra_offset_bps: Optional[Decimal] = None,
-        regime: Optional[str] = None,
-        trend_direction: Optional[str] = None,
-        trend_strength: Optional[Decimal] = None,
-        inventory_band: Optional[str] = None,
-        funding_bias_bps: Optional[Decimal] = None,
-    ) -> None:
-        if not self._settings.journal_reprice_decisions:
-            return
-        self._journal.record_reprice_decision(
-            side=self._normalise_side(str(side)),
-            level=level,
-            reason=reason,
-            current_best=current_best,
-            prev_price=prev_price,
-            target_price=target_price,
-            spread_bps=spread_bps,
-            extra_offset_bps=extra_offset_bps,
-            regime=regime,
-            trend_direction=trend_direction,
-            trend_strength=trend_strength,
-            inventory_band=inventory_band,
-            funding_bias_bps=funding_bias_bps,
-        )
+    def _record_reprice_decision(self, **kwargs: Any) -> None:
+        record_reprice_decision(self, **kwargs)
 
     async def _cancel_level_order(
         self,
@@ -487,34 +206,12 @@ class MarketMakerStrategy:
         level: int,
         reason: str,
     ) -> bool:
-        """Request cancel for a level order and store a structured reason.
-
-        Returns True when the level slot can be safely freed:
-        - order already reached a terminal state.
-        A successful cancel request does not free the slot immediately;
-        replacement waits for WS terminal confirmation.
-        """
-        _ = (side, level)
-        pending_ext = self._level_cancel_pending_ext_id.get(key)
-        if pending_ext == external_id:
-            return False
-        self._pending_cancel_reasons[external_id] = reason
-        ok = await self._orders.cancel_order(external_id)
-        if ok:
-            self._level_cancel_pending_ext_id[key] = external_id
-            return False
-
-        # If the order is no longer active, treat it as terminal and free the slot.
-        if self._orders.find_order_by_external_id(external_id) is not None:
-            if self._orders.get_active_order(external_id) is None:
-                self._clear_level_slot(key)
-                return True
-
-        self._pending_cancel_reasons.pop(external_id, None)
-        return False
+        return await cancel_level_order(
+            self, key=key, external_id=external_id,
+            side=side, level=level, reason=reason,
+        )
 
     def _quantize_size(self, size: Decimal) -> Decimal:
-        """Quantize order size to market step size."""
         if size <= 0:
             return Decimal("0")
         if self._min_order_size_step <= 0:
@@ -531,47 +228,10 @@ class MarketMakerStrategy:
         )
 
     def _estimate_tick_time_ms(self) -> float:
-        """Estimate how many ms it takes for the market to move one tick.
-
-        Uses recent micro-volatility to derive price speed, then converts
-        tick_size into a time estimate.  Returns 0 if data is insufficient
-        (which disables the latency-tick buffer).
-        """
-        window_s = self._settings.micro_vol_window_s
-        if window_s <= 0:
-            return 0.0
-        vol_bps = self._ob.micro_volatility_bps(window_s)
-        if vol_bps is None or vol_bps <= 0:
-            return 0.0
-        bid = self._ob.best_bid()
-        ask = self._ob.best_ask()
-        if bid is None or ask is None:
-            return 0.0
-        bp = getattr(bid, "price", None)
-        ap = getattr(ask, "price", None)
-        if bp is None or ap is None or bp <= 0 or ap <= 0:
-            return 0.0
-        mid = (bp + ap) / 2
-        tick_bps = float(self._tick_size / mid * Decimal("10000"))
-        if tick_bps <= 0:
-            return 0.0
-        # vol_bps is measured over window_s seconds
-        vol_per_ms = float(vol_bps) / (window_s * 1000.0)
-        if vol_per_ms <= 0:
-            return 0.0
-        return tick_bps / vol_per_ms
+        return estimate_tick_time_ms(self)
 
     def _on_adverse_markout_widen(self, key: tuple[str, int], reason: str) -> None:
-        """Callback from FillQualityTracker when a level has adverse markout."""
-        base_ticks = max(1, int(self._settings.post_only_safety_ticks))
-        max_ticks = max(base_ticks, int(self._settings.pof_max_safety_ticks))
-        current = self._post_only.dynamic_safety_ticks.get(key, base_ticks)
-        new_ticks = min(max_ticks, current + 1)
-        self._post_only.dynamic_safety_ticks[key] = new_ticks
-        logger.warning(
-            "Adverse markout widen for %s: safety_ticks %d -> %d (reason=%s)",
-            key, current, new_ticks, reason,
-        )
+        on_adverse_markout_widen(self, key, reason)
 
     def _apply_adaptive_pof_reject(self, key: tuple[str, int]) -> None:
         self._post_only.on_rejection(key)
@@ -600,70 +260,15 @@ class MarketMakerStrategy:
         )
 
     def _toxicity_adjustment(self) -> tuple[Decimal, Optional[str]]:
-        """Return (extra_offset_bps, pause_reason) from microstructure stress."""
-        if self._settings.market_profile == "crypto":
-            regime = self._volatility.evaluate()
-            if regime.pause:
-                return Decimal("0"), "volatility_spike"
-            extra_bps = max(
-                Decimal("0"),
-                (regime.offset_scale - Decimal("1")) * self._settings.min_offset_bps,
-            )
-            return extra_bps, None
-
-        vol_bps = self._ob.micro_volatility_bps(self._settings.micro_vol_window_s)
-        drift_bps = self._ob.micro_drift_bps(self._settings.micro_drift_window_s)
-        drift_abs = abs(drift_bps) if drift_bps is not None else None
-
-        vol_limit = self._settings.micro_vol_max_bps
-        drift_limit = self._settings.micro_drift_max_bps
-
-        # Hard pause on severe micro-regime stress.
-        if (
-            vol_bps is not None
-            and vol_limit > 0
-            and vol_bps > (vol_limit * Decimal("1.25"))
-        ):
-            return Decimal("0"), "volatility_spike"
-        if (
-            drift_abs is not None
-            and drift_limit > 0
-            and drift_abs > (drift_limit * Decimal("1.25"))
-        ):
-            return Decimal("0"), "drift_spike"
-
-        # Moderate widening above soft thresholds.
-        extra_bps = Decimal("0")
-        if vol_bps is not None and vol_limit > 0 and vol_bps > vol_limit:
-            extra_bps += (vol_bps - vol_limit) * self._settings.volatility_offset_multiplier
-        if drift_abs is not None and drift_limit > 0 and drift_abs > drift_limit:
-            extra_bps += (
-                drift_abs - drift_limit
-            ) * self._settings.volatility_offset_multiplier
-        return max(Decimal("0"), extra_bps), None
+        return toxicity_adjustment(self)
 
     @staticmethod
     def _normalise_side(side_value: str) -> str:
-        side_upper = side_value.upper()
-        if "BUY" in side_upper:
-            return "BUY"
-        if "SELL" in side_upper:
-            return "SELL"
-        return side_value
+        return normalise_side(side_value)
 
     @staticmethod
     def _is_fatal_exception(exc: BaseException) -> bool:
-        """Return True if the exception indicates an irrecoverable error.
-
-        Irrecoverable errors (auth failures, revoked keys, delisted markets)
-        should trigger a shutdown rather than infinite 1-second retries.
-        """
-        msg = str(exc).lower()
-        exc_type = type(exc).__name__.lower()
-        for pattern in _FATAL_EXCEPTION_PATTERNS:
-            if pattern in msg or pattern in exc_type:
-                return True
-        return False
+        return is_fatal_exception(exc)
 
     def _increases_inventory(self, side: OrderSide) -> bool:
         side_name = self._normalise_side(str(side))
@@ -673,10 +278,6 @@ class MarketMakerStrategy:
         if side_name == "SELL":
             return pos <= 0
         return False
-
-    # ------------------------------------------------------------------
-    # Funding delegation — see FundingManager for full logic
-    # ------------------------------------------------------------------
 
     def _set_funding_rate(self, funding_rate: Decimal) -> None:
         self._funding_mgr.set_funding_rate(funding_rate)
@@ -716,10 +317,6 @@ class MarketMakerStrategy:
     def _set_runtime_mode(self, mode: str) -> None:
         self._runtime_mode = str(mode)
 
-    # ------------------------------------------------------------------
-    # Quote halt delegation — see QuoteHaltManager for full logic
-    # ------------------------------------------------------------------
-
     @property
     def _quote_halt_reasons(self) -> Set[str]:
         return self._halt_mgr.reasons
@@ -751,105 +348,13 @@ class MarketMakerStrategy:
         )
 
     async def _on_stream_desync(self, reason: str) -> None:
-        self._halt_mgr.set_halt("stream_desync")
-        self._journal.record_exchange_event(
-            event_type="stream_desync",
-            details={"reason": reason},
-        )
-        if self._orders.active_order_count() > 0:
-            try:
-                await self._orders.cancel_all_orders()
-            except Exception:
-                logger.debug("stream desync cancel-all failed", exc_info=True)
+        await on_stream_desync(self, reason)
 
     def _sync_quote_halt_state(self) -> None:
-        rate_limit_halt = getattr(self._orders, "in_rate_limit_halt", False)
-        if not isinstance(rate_limit_halt, bool):
-            rate_limit_halt = False
-        self._halt_mgr.sync_state(
-            rate_limit_halt=rate_limit_halt,
-            streams_healthy=self._streams_healthy(),
-        )
+        sync_quote_halt_state(self)
 
     def _rebuild_components(self) -> None:
-        quote_anchor = str(getattr(self._settings.quote_anchor, "value", self._settings.quote_anchor)).lower()
-        markout_anchor = str(
-            getattr(self._settings.markout_anchor, "value", self._settings.markout_anchor)
-        ).lower()
-        if quote_anchor != "mid" or markout_anchor != "mid":
-            raise ValueError(
-                "This rollout locks quote_anchor and markout_anchor to 'mid' for coherence."
-            )
-
-        self._pricing = PricingEngine(
-            settings=self._settings,
-            orderbook_mgr=self._ob,
-            risk_mgr=self._risk,
-            tick_size=self._tick_size,
-            base_order_size=self._base_order_size,
-            min_order_size_step=self._min_order_size_step,
-        )
-        self._post_only = PostOnlySafety(
-            settings=self._settings,
-            tick_size=self._tick_size,
-            round_to_tick=self._pricing.round_to_tick,
-        )
-        self._volatility = VolatilityRegime(self._settings, self._ob)
-        self._trend_signal = TrendSignal(self._settings, self._ob)
-        self._guards = GuardPolicy(self._settings)
-        self._reprice = RepricePipeline(self._settings, self._tick_size, self._pricing)
-        self._drawdown_stop = DrawdownStop(
-            enabled=self._settings.drawdown_stop_enabled,
-            max_position_notional_usd=self._settings.max_position_notional_usd,
-            drawdown_pct_of_max_notional=self._settings.drawdown_stop_pct_of_max_notional,
-            use_high_watermark=self._settings.drawdown_use_high_watermark,
-        )
-        # Sync mutable refs into risk watchdog if it exists.
-        if hasattr(self, "_risk_watchdog"):
-            self._risk_watchdog._drawdown_stop = self._drawdown_stop
-            self._risk_watchdog._post_only = self._post_only
-
-        # Fill quality tracker for markout analysis and auto-widening.
-        self._fill_quality = FillQualityTracker(self._ob)
-        self._fill_quality.set_min_acceptable_markout_bps(
-            self._settings.min_acceptable_markout_bps,
-        )
-        self._fill_quality.set_offset_widen_callback(self._on_adverse_markout_widen)
-
-        # Wire optional trackers into metrics.
-        self._metrics.set_fill_quality_tracker(self._fill_quality)
-        self._metrics.set_post_only_safety(self._post_only)
-        self._metrics.set_quote_halt_state(self._quote_halt_reasons)
-        self._metrics.set_margin_guard_breached(self._margin_breach_since is not None)
-
-        # --- Phase 4 institutional features ---
-        # P&L attribution tracker (persists across rebuilds).
-        if not hasattr(self, "_pnl_attribution"):
-            self._pnl_attribution = PnLAttributionTracker()
-        # Quote-to-trade ratio monitor.
-        self._qtr = QuoteTradeRatioTracker(
-            warn_threshold=50.0,
-            critical_threshold=100.0,
-        )
-        # Venue latency SLA monitor.
-        self._latency_monitor = LatencyMonitor(
-            warn_ms=200.0,
-            critical_ms=1000.0,
-        )
-        # Config rollback watchdog (persists across rebuilds).
-        if not hasattr(self, "_config_rollback"):
-            self._config_rollback = ConfigRollbackWatchdog()
-
-        # Keep legacy attribute names as aliases for one release cycle.
-        self._level_pof_until = self._post_only.pof_until
-        self._level_pof_streak = self._post_only.pof_streak
-        self._level_pof_last_ts = self._post_only.pof_last_ts
-        self._level_dynamic_safety_ticks = self._post_only.dynamic_safety_ticks
-        self._level_imbalance_pause_until = self._guards._level_imbalance_pause_until
-
-    # ------------------------------------------------------------------
-    # Risk watchdog delegation — see RiskWatchdog for full logic
-    # ------------------------------------------------------------------
+        rebuild_components(self)
 
     @property
     def _circuit_open(self) -> bool:
@@ -866,185 +371,11 @@ class MarketMakerStrategy:
             self._client, self._settings.market_name, self._shutdown_event,
         )
 
-    async def _balance_refresh_task(self) -> None:
-        """Periodically refresh available-for-trade collateral headroom."""
-        while not self._shutdown_event.is_set():
-            try:
-                await self._risk.refresh_balance()
-            except asyncio.CancelledError:
-                return
-            except Exception:
-                logger.debug("Balance refresh failed", exc_info=True)
-            await asyncio.sleep(_BALANCE_REFRESH_INTERVAL_S)
-
     def _margin_guard_breach(self) -> tuple[bool, list[str], dict[str, Optional[Decimal]]]:
         return self._risk_watchdog.margin_guard_breach()
 
     async def _margin_guard_task(self) -> None:
         await self._risk_watchdog.margin_guard_task(self._shutdown_event)
-
-    async def _kpi_watchdog_task(self) -> None:
-        while not self._shutdown_event.is_set():
-            try:
-                self._sync_quote_halt_state()
-
-                taker_count = (
-                    int(self._account_stream.taker_fill_count_1m())
-                    if hasattr(self._account_stream, "taker_fill_count_1m")
-                    else 0
-                )
-                taker_ratio = (
-                    Decimal(str(self._account_stream.taker_fill_notional_ratio_1m()))
-                    if hasattr(self._account_stream, "taker_fill_notional_ratio_1m")
-                    else Decimal("0")
-                )
-
-                now = time.monotonic()
-                if (
-                    taker_count > 0
-                    and self._is_normal_quoting_mode()
-                    and (now - self._last_taker_leakage_warn_at) >= 30.0
-                ):
-                    self._last_taker_leakage_warn_at = now
-                    logger.warning(
-                        "Taker leakage detected for %s: count_1m=%d notional_ratio_1m=%.2f%%",
-                        self._settings.market_name,
-                        taker_count,
-                        float(taker_ratio * Decimal("100")),
-                    )
-                    self._journal.record_exchange_event(
-                        event_type="taker_leakage_warning",
-                        details={
-                            "count_1m": taker_count,
-                            "notional_ratio_1m": taker_ratio,
-                            "runtime_mode": self._runtime_mode,
-                        },
-                    )
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
-                logger.error("KPI watchdog task error: %s", exc, exc_info=True)
-            await asyncio.sleep(_KPI_WATCHDOG_INTERVAL_S)
-
-    # ------------------------------------------------------------------
-    # Phase 4: Institutional monitoring tasks
-    # ------------------------------------------------------------------
-
-    async def _pnl_attribution_task(self) -> None:
-        """Periodically log P&L attribution breakdown to the journal."""
-        while not self._shutdown_event.is_set():
-            try:
-                bid = self._ob.best_bid()
-                ask = self._ob.best_ask()
-                mid = None
-                if bid is not None and ask is not None and bid.price > 0:
-                    mid = (bid.price + ask.price) / 2
-                snap = self._pnl_attribution.snapshot(current_mid=mid)
-                if snap.fill_count > 0:
-                    self._journal.record_exchange_event(
-                        event_type="pnl_attribution",
-                        details={
-                            "spread_capture_usd": str(snap.spread_capture_usd),
-                            "inventory_pnl_usd": str(snap.inventory_pnl_usd),
-                            "fee_pnl_usd": str(snap.fee_pnl_usd),
-                            "funding_pnl_usd": str(snap.funding_pnl_usd),
-                            "total_usd": str(snap.total_usd),
-                            "fill_count": snap.fill_count,
-                            "buy_fills": snap.buy_fill_count,
-                            "sell_fills": snap.sell_fill_count,
-                            "maker_fills": snap.maker_fill_count,
-                            "taker_fills": snap.taker_fill_count,
-                            "avg_spread_capture_bps": str(snap.avg_spread_capture_bps),
-                            "total_volume_usd": str(snap.total_volume_usd),
-                        },
-                    )
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
-                logger.error("P&L attribution task error: %s", exc)
-            await asyncio.sleep(_PNL_ATTRIBUTION_LOG_INTERVAL_S)
-
-    async def _qtr_monitor_task(self) -> None:
-        """Periodically evaluate quote-to-trade ratio."""
-        while not self._shutdown_event.is_set():
-            try:
-                snap = self._qtr.evaluate()
-                if snap.quotes_in_window > 0:
-                    self._journal.record_exchange_event(
-                        event_type="qtr_snapshot",
-                        details={
-                            "quotes": snap.quotes_in_window,
-                            "fills": snap.fills_in_window,
-                            "ratio": str(snap.ratio),
-                            "warn": snap.warn_active,
-                            "critical": snap.critical_active,
-                        },
-                    )
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
-                logger.error("QTR monitor task error: %s", exc)
-            await asyncio.sleep(_QTR_EVALUATE_INTERVAL_S)
-
-    async def _latency_sla_task(self) -> None:
-        """Periodically evaluate venue latency SLA and adjust quoting."""
-        while not self._shutdown_event.is_set():
-            try:
-                # Feed latency samples from order manager into monitor.
-                for sample in getattr(self._orders, "_latency_samples", []):
-                    self._latency_monitor.record_latency(sample)
-
-                snap = self._latency_monitor.evaluate()
-                if snap.halt_quoting:
-                    self._set_quote_halt("latency_sla")
-                else:
-                    self._clear_quote_halt("latency_sla")
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
-                logger.error("Latency SLA task error: %s", exc)
-            await asyncio.sleep(_LATENCY_SLA_INTERVAL_S)
-
-    async def _config_rollback_task(self) -> None:
-        """Periodically evaluate whether a recent config change degraded performance."""
-        while not self._shutdown_event.is_set():
-            try:
-                if self._config_rollback.has_pending_evaluation:
-                    # Gather current metrics for evaluation.
-                    fq = getattr(self, "_fill_quality", None)
-                    avg_markout_1s = Decimal("0")
-                    if fq is not None:
-                        summary = fq.segmented_markout_summary("1s")
-                        avg_markout_1s = summary.avg_all
-
-                    pnl_snap = self._pnl_attribution.snapshot()
-                    decision = self._config_rollback.evaluate(
-                        avg_markout_1s_bps=avg_markout_1s,
-                        fill_count=pnl_snap.fill_count,
-                        session_pnl_usd=self._risk.get_session_pnl(),
-                        avg_spread_capture_bps=pnl_snap.avg_spread_capture_bps,
-                    )
-                    if decision.should_rollback:
-                        good_config = self._config_rollback.last_known_good_config
-                        self._journal.record_exchange_event(
-                            event_type="config_rollback",
-                            details={
-                                "reason": decision.reason,
-                                "degraded_metrics": {
-                                    k: str(v) for k, v in decision.degraded_metrics.items()
-                                },
-                            },
-                        )
-                        logger.warning(
-                            "Config rollback triggered: %s (good config available: %s)",
-                            decision.reason,
-                            good_config is not None,
-                        )
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
-                logger.error("Config rollback task error: %s", exc)
-            await asyncio.sleep(_CONFIG_ROLLBACK_INTERVAL_S)
 
     def _order_age_exceeded(
         self,
@@ -1052,15 +383,16 @@ class MarketMakerStrategy:
         *,
         max_age_s: Optional[float] = None,
     ) -> bool:
-        """Return True if the tracked order at *key* exceeded max_order_age_s."""
-        if max_age_s is None:
-            max_age_s = self._settings.max_order_age_s
-        if max_age_s <= 0:
-            return False
-        placed_ts = self._level_order_created_at.get(key)
-        if placed_ts is None:
-            return False
-        return (time.monotonic() - placed_ts) > max_age_s
+        return order_age_exceeded(self, key, max_age_s=max_age_s)
+
+    def _compute_target_price(self, side, level, best_price, **kw) -> Decimal:
+        return self._pricing.compute_target_price(side, level, best_price, **kw)
+
+    def _level_size(self, level: int) -> Decimal:
+        return self._pricing.level_size(level)
+
+    def _needs_reprice(self, side, prev_price, current_best, level, **kw):
+        return self._reprice.needs_reprice(side, prev_price, current_best, level, **kw)
 
     def _compute_offset(
         self,
@@ -1070,30 +402,7 @@ class MarketMakerStrategy:
         regime_scale: Decimal = Decimal("1"),
     ) -> Decimal:
         return self._pricing.compute_offset(
-            level,
-            best_price,
-            regime_scale=regime_scale,
-        )
-
-    def _compute_target_price(
-        self,
-        side: OrderSide,
-        level: int,
-        best_price: Decimal,
-        *,
-        extra_offset_bps: Decimal = Decimal("0"),
-        regime_scale: Decimal = Decimal("1"),
-        trend: Optional[TrendState] = None,
-        funding_bias_bps: Decimal = Decimal("0"),
-    ) -> Decimal:
-        return self._pricing.compute_target_price(
-            side,
-            level,
-            best_price,
-            extra_offset_bps=extra_offset_bps,
-            regime_scale=regime_scale,
-            trend=trend,
-            funding_bias_bps=funding_bias_bps,
+            level, best_price, regime_scale=regime_scale,
         )
 
     def _round_to_tick(
@@ -1101,67 +410,10 @@ class MarketMakerStrategy:
     ) -> Decimal:
         return self._pricing.round_to_tick(price, side)
 
-    def _level_size(self, level: int) -> Decimal:
-        return self._pricing.level_size(level)
-
-    def _needs_reprice(
-        self,
-        side: OrderSide,
-        prev_price: Decimal,
-        current_best: Decimal,
-        level: int,
-        *,
-        extra_offset_bps: Decimal = Decimal("0"),
-        regime_scale: Decimal = Decimal("1"),
-        trend: Optional[TrendState] = None,
-        funding_bias_bps: Decimal = Decimal("0"),
-    ) -> tuple[bool, str]:
-        return self._reprice.needs_reprice(
-            side,
-            prev_price,
-            current_best,
-            level,
-            extra_offset_bps=extra_offset_bps,
-            regime_scale=regime_scale,
-            trend=trend,
-            funding_bias_bps=funding_bias_bps,
-        )
-
     def _theoretical_edge_bps(
-        self,
-        side: OrderSide,
-        quote_price: Decimal,
-        current_best: Decimal,
+        self, side: OrderSide, quote_price: Decimal, current_best: Decimal,
     ) -> Decimal:
         return self._pricing.theoretical_edge_bps(side, quote_price, current_best)
-
-    # ------------------------------------------------------------------
-    # Background position refresh (safety-net)
-    # ------------------------------------------------------------------
-
-    async def _position_refresh_task(self) -> None:
-        """Periodically refresh the cached position from the exchange.
-
-        This is a safety net — the account stream provides real-time updates.
-        """
-        while not self._shutdown_event.is_set():
-            try:
-                await self._risk.refresh_position()
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
-                logger.error("Position refresh error: %s", exc)
-                self._journal.record_error(
-                    component="position_refresh",
-                    exception_type=type(exc).__name__,
-                    message=str(exc),
-                    stack_trace_hash=TradeJournal.make_stack_trace_hash(exc),
-                )
-            await asyncio.sleep(_POSITION_REFRESH_INTERVAL_S)
-
-    # ------------------------------------------------------------------
-    # Circuit breaker delegation — see RiskWatchdog for full logic
-    # ------------------------------------------------------------------
 
     async def _circuit_breaker_task(self) -> None:
         await self._risk_watchdog.circuit_breaker_task(self._shutdown_event)

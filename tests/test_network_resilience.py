@@ -233,7 +233,7 @@ async def test_rate_limiter_blocks_when_exhausted():
 
     # Third should timeout (rate limiter semaphore exhausted)
     # We need to patch the timeout to be very short
-    with patch.object(mgr, "_rate_semaphore") as mock_sem:
+    with patch.object(mgr._rate_state, "_rate_semaphore") as mock_sem:
         mock_sem.acquire = AsyncMock(side_effect=asyncio.TimeoutError())
         await mgr.place_order(
             side=OrderSide.BUY, price=Decimal("10"), size=Decimal("1"), level=0
@@ -248,8 +248,8 @@ async def test_rate_limiter_blocks_when_exhausted():
 async def test_rate_limiter_respects_token_count():
     """Semaphore initial value matches max_orders_per_second."""
     mgr = _make_mgr(max_orders_per_second=7.0)
-    assert mgr._rate_tokens == 7
-    assert mgr._rate_semaphore._value == 7
+    assert mgr._rate_state._rate_tokens == 7
+    assert mgr._rate_state._rate_semaphore._value == 7
 
 
 @pytest.mark.asyncio
@@ -258,8 +258,8 @@ async def test_rate_limiter_replenish_task():
     mgr = _make_mgr(max_orders_per_second=10.0)
     # Consume 3 tokens
     for _ in range(3):
-        await mgr._rate_semaphore.acquire()
-    assert mgr._rate_semaphore._value == 7  # 10 - 3
+        await mgr._rate_state._rate_semaphore.acquire()
+    assert mgr._rate_state._rate_semaphore._value == 7  # 10 - 3
 
     mgr.start_rate_limiter()
     # Wait for a few replenishment cycles
@@ -267,19 +267,19 @@ async def test_rate_limiter_replenish_task():
     await mgr.stop_rate_limiter()
 
     # Should have replenished some tokens (but not above max)
-    assert mgr._rate_semaphore._value > 7
-    assert mgr._rate_semaphore._value <= 10
+    assert mgr._rate_state._rate_semaphore._value > 7
+    assert mgr._rate_state._rate_semaphore._value <= 10
 
 
 @pytest.mark.asyncio
 async def test_rate_limiter_start_stop():
     """Rate limiter task can be started and stopped."""
     mgr = _make_mgr()
-    assert mgr._rate_replenish_task is None
+    assert mgr._rate_state._rate_replenish_task is None
     mgr.start_rate_limiter()
-    assert mgr._rate_replenish_task is not None
+    assert mgr._rate_state._rate_replenish_task is not None
     await mgr.stop_rate_limiter()
-    assert mgr._rate_replenish_task is None
+    assert mgr._rate_state._rate_replenish_task is None
 
 
 # ===========================================================================
@@ -352,7 +352,7 @@ async def test_maintenance_on_error_string():
 async def test_maintenance_blocks_subsequent_orders():
     """No orders placed during maintenance window."""
     mgr = _make_mgr(maintenance_pause_s=30.0)
-    mgr._maintenance_until = time.monotonic() + 30.0
+    mgr._rate_state._maintenance_until = time.monotonic() + 30.0
 
     ext_id = await mgr.place_order(
         side=OrderSide.BUY, price=Decimal("10"), size=Decimal("1"), level=0
@@ -366,7 +366,7 @@ async def test_maintenance_blocks_subsequent_orders():
 async def test_maintenance_expires():
     """Maintenance window expires after configured time."""
     mgr = _make_mgr(maintenance_pause_s=0.1)
-    mgr._maintenance_until = time.monotonic() + 0.05
+    mgr._rate_state._maintenance_until = time.monotonic() + 0.05
     await asyncio.sleep(0.06)
     assert not mgr.in_maintenance
 
@@ -441,11 +441,12 @@ def test_maintenance_check_exception_normal():
 
 def test_is_maintenance_error_patterns():
     """Verify maintenance error pattern matching."""
-    assert OrderManager._is_maintenance_error("service unavailable")
-    assert OrderManager._is_maintenance_error("Exchange under Maintenance")
-    assert OrderManager._is_maintenance_error("HTTP 503 error")
-    assert not OrderManager._is_maintenance_error("invalid_order")
-    assert not OrderManager._is_maintenance_error("insufficient_balance")
+    from market_maker.order_rate_state import OrderRateState
+    assert OrderRateState._is_maintenance_error("service unavailable")
+    assert OrderRateState._is_maintenance_error("Exchange under Maintenance")
+    assert OrderRateState._is_maintenance_error("HTTP 503 error")
+    assert not OrderRateState._is_maintenance_error("invalid_order")
+    assert not OrderRateState._is_maintenance_error("insufficient_balance")
 
 
 # ===========================================================================
