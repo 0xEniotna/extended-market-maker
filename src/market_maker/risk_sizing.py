@@ -9,14 +9,17 @@ from __future__ import annotations
 
 import logging
 from decimal import ROUND_DOWN, Decimal
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from x10.perpetual.orders import OrderSide
+
+if TYPE_CHECKING:
+    from .risk_manager import RiskManager
 
 logger = logging.getLogger(__name__)
 
 
-def get_orderbook_mid_price(risk: object) -> Optional[Decimal]:
+def get_orderbook_mid_price(risk: RiskManager) -> Optional[Decimal]:
     """Fetch mid price from the orderbook manager if available and fresh."""
     ob = getattr(risk, "_orderbook_mgr", None)
     if ob is None:
@@ -32,7 +35,7 @@ def get_orderbook_mid_price(risk: object) -> Optional[Decimal]:
     return Decimal(str((bid.price + ask.price) / 2))
 
 
-def is_balance_stale(risk: object) -> bool:
+def is_balance_stale(risk: RiskManager) -> bool:
     """Return True if cached balance is older than staleness threshold."""
     import time
     max_s = getattr(risk, "_balance_staleness_max_s", 0.0)
@@ -41,10 +44,10 @@ def is_balance_stale(risk: object) -> bool:
     updated_at = getattr(risk, "_cached_balance_updated_at", None)
     if updated_at is None:
         return True
-    return (time.monotonic() - updated_at) > max_s
+    return bool((time.monotonic() - updated_at) > max_s)
 
 
-def effective_max_position_for_side(risk: object, side: OrderSide) -> Decimal:
+def effective_max_position_for_side(risk: RiskManager, side: OrderSide) -> Decimal:
     """Return the effective max position size for the given side."""
     from .risk_manager import RiskManager
     is_buy = RiskManager._is_buy_side(side)
@@ -59,7 +62,7 @@ def effective_max_position_for_side(risk: object, side: OrderSide) -> Decimal:
 
 
 def allowed_order_size(
-    risk: object,
+    risk: RiskManager,
     side: OrderSide,
     requested_size: Decimal,
     reference_price: Decimal,

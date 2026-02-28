@@ -9,14 +9,17 @@ from __future__ import annotations
 
 import time
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .decision_models import RepriceMarketContext
 from .types import StrategyContext
 
+if TYPE_CHECKING:
+    from .reprice_pipeline import RepricePipeline, RiskAdjustedOrder
+
 
 def compute_risk_adjusted_order(
-    pipeline: Any,
+    pipeline: RepricePipeline,
     strategy: StrategyContext,
     side,
     level: int,
@@ -24,7 +27,7 @@ def compute_risk_adjusted_order(
     level_ctx: Any,
     quote_inputs: Any,
     market_ctx: RepriceMarketContext,
-) -> Any:
+) -> RiskAdjustedOrder:
     """Compute target price and risk-clipped size for a level."""
     from .reprice_pipeline import RiskAdjustedOrder
 
@@ -89,7 +92,7 @@ def compute_risk_adjusted_order(
 
 
 async def execute_replace_if_needed(
-    pipeline: Any,
+    pipeline: RepricePipeline,
     strategy: StrategyContext,
     side,
     level: int,

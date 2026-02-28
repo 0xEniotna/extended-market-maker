@@ -206,7 +206,7 @@ async def flatten_position(
     try:
         from x10.utils.http import RateLimitException
     except Exception:
-        class RateLimitException(Exception):
+        class RateLimitException(Exception):  # type: ignore[no-redef]
             pass
 
     try:

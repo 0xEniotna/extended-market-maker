@@ -413,8 +413,9 @@ async def run_strategy(strategy_cls: Type) -> None:
         await trading_client.close()
         return
     try:
-        await ctx.fee_resolver.refresh(force=True)
-        await ctx.fee_resolver.validate_builder_config()
+        if ctx.fee_resolver is not None:
+            await ctx.fee_resolver.refresh(force=True)
+            await ctx.fee_resolver.validate_builder_config()
     except Exception as exc:
         logger.error("Fee resolver startup validation failed: %s", exc)
         await trading_client.close()

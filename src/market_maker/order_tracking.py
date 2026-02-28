@@ -10,7 +10,7 @@ import logging
 import time
 from collections import deque
 from decimal import Decimal
-from typing import Dict, Optional
+from typing import Dict, Mapping, Optional
 
 from x10.perpetual.orders import OrderSide
 
@@ -91,7 +91,7 @@ class LatencyTracker:
 
 
 def find_zombie_orders(
-    active_orders: Dict[str, object],
+    active_orders: Mapping[str, object],
     pending_cancel: Dict[str, float],
     max_age_s: float,
 ) -> list:
@@ -110,7 +110,7 @@ def find_zombie_orders(
 
 
 def reserved_exposure(
-    active_orders: Dict[str, object],
+    active_orders: Mapping[str, object],
     pending_cancel: Dict[str, float],
     *,
     side: OrderSide,

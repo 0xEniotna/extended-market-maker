@@ -329,6 +329,8 @@ class RepricePipeline:
                     extra_offset_bps=quote_inputs.extra_offset_bps,
                 ),
             )
+            if level_ctx.prev_ext_id is None:
+                return True
             cancelled = await strategy._cancel_level_order(
                 key=level_ctx.key,
                 external_id=level_ctx.prev_ext_id,

@@ -287,4 +287,4 @@ def estimate_tick_time_ms(s: Any) -> float:
     vol_per_ms = float(vol_bps) / (window_s * 1000.0)
     if vol_per_ms <= 0:
         return 0.0
-    return tick_bps / vol_per_ms
+    return float(tick_bps / vol_per_ms)

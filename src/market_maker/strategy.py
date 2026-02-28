@@ -22,11 +22,15 @@ from x10.perpetual.trading_client import PerpetualTradingClient
 from .account_stream import AccountStreamManager, FillEvent
 from .config import MarketMakerSettings
 from .decision_models import TrendState
+from .drawdown_stop import DrawdownStop
 from .funding_manager import FundingManager
 from .metrics import MetricsCollector
 from .order_manager import OrderManager
 from .orderbook_manager import OrderbookManager
+from .post_only_safety import PostOnlySafety
+from .pricing_engine import PricingEngine
 from .quote_halt_manager import QuoteHaltManager
+from .reprice_pipeline import RepricePipeline
 from .risk_manager import RiskManager
 from .risk_watchdog import RiskWatchdog
 from .strategy_callbacks import on_fill, on_level_freed
@@ -107,6 +111,13 @@ class MarketMakerStrategy:
         self._runtime_mode: str = "normal"
         self._last_taker_leakage_warn_at: float = 0.0
 
+        # Declared for mypy; populated by _rebuild_components().
+        self._pricing: PricingEngine
+        self._post_only: PostOnlySafety
+        self._reprice: RepricePipeline
+        self._drawdown_stop: DrawdownStop
+        self._level_pof_until: Dict[tuple[str, int], float]
+
         self._rebuild_components()
 
         self._risk_watchdog = RiskWatchdog(
@@ -186,7 +197,7 @@ class MarketMakerStrategy:
         if self._quote_halt_reasons:
             return
         market_ctx = build_reprice_market_context(self)
-        await self._reprice.evaluate(self, side, level, market_ctx=market_ctx)
+        await self._reprice.evaluate(self, side, level, market_ctx=market_ctx)  # type: ignore[arg-type]
 
     def _clear_level_slot(self, key: tuple[str, int]) -> None:
         self._level_ext_ids[key] = None

@@ -232,4 +232,4 @@ def order_age_exceeded(
     placed_ts = s._level_order_created_at.get(key)
     if placed_ts is None:
         return False
-    return (time.monotonic() - placed_ts) > max_age_s
+    return bool((time.monotonic() - placed_ts) > max_age_s)

@@ -11,9 +11,12 @@ import asyncio
 import logging
 import time
 from decimal import Decimal
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from x10.perpetual.orders import OrderSide, OrderType, TimeInForce
+
+if TYPE_CHECKING:
+    from .order_manager import OrderManager
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +34,7 @@ _PENDING_CANCEL_TIMEOUT_S = 10.0
 
 
 async def place_order(
-    mgr: Any,
+    mgr: OrderManager,
     side: OrderSide,
     price: Decimal,
     size: Decimal,
@@ -128,7 +131,7 @@ async def place_order(
                 info.exchange_order_id = exchange_id
                 mgr._orders_by_exchange_id[exchange_id] = info
         else:
-            info = mgr._pending_placements.pop(external_id, None) or pending_info
+            info = mgr._pending_placements.pop(external_id, pending_info)
             if exchange_id is not None:
                 info.exchange_order_id = exchange_id
             mgr._active_orders[external_id] = info
