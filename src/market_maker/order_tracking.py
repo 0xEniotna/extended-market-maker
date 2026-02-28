@@ -60,6 +60,7 @@ class LatencyTracker:
 
     def __init__(self, maxlen: int = 50) -> None:
         self._samples: deque[float] = deque(maxlen=maxlen)
+        self._pending_samples: deque[float] = deque()
         self._send_ts: Dict[str, float] = {}
 
     @property
@@ -76,10 +77,17 @@ class LatencyTracker:
             return None
         latency_ms = (time.monotonic() - send_ts) * 1000.0
         self._samples.append(latency_ms)
+        self._pending_samples.append(latency_ms)
         return latency_ms
 
     def discard(self, ext_id: str) -> None:
         self._send_ts.pop(ext_id, None)
+
+    def drain_samples(self) -> list[float]:
+        """Return new latency samples since last drain."""
+        drained = list(self._pending_samples)
+        self._pending_samples.clear()
+        return drained
 
     def avg_ms(self) -> float:
         if not self._samples:

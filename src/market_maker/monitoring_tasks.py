@@ -192,7 +192,13 @@ async def latency_sla_task(s: Any) -> None:
     """Periodically evaluate venue latency SLA and adjust quoting."""
     while not s._shutdown_event.is_set():
         try:
-            for sample in getattr(s._orders, "_latency_samples", []):
+            drain_fn = getattr(s._orders, "drain_latency_samples", None)
+            if callable(drain_fn):
+                samples = drain_fn()
+            else:
+                samples = getattr(s._orders, "_latency_samples", [])
+
+            for sample in samples:
                 s._latency_monitor.record_latency(sample)
 
             snap = s._latency_monitor.evaluate()

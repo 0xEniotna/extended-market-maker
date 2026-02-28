@@ -151,6 +151,10 @@ class OrderManager:
     def _latency_samples(self) -> deque:
         return self._latency.samples
 
+    def drain_latency_samples(self) -> list[float]:
+        """Return newly observed order latencies since last drain."""
+        return self._latency.drain_samples()
+
     def set_journal(self, journal: object) -> None:
         self._rate_state.set_journal(journal)
 
