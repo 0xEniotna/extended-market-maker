@@ -168,11 +168,15 @@ class AccountStreamManager:
         self._prune_fill_window()
         if not self._rolling_fill_window_1m:
             return Decimal("0")
-        total = sum(notional for _, notional, _ in self._rolling_fill_window_1m)
+        total: Decimal = sum(
+            (notional for _, notional, _ in self._rolling_fill_window_1m),
+            Decimal("0"),
+        )
         if total <= 0:
             return Decimal("0")
-        taker = sum(
-            notional for _, notional, is_taker in self._rolling_fill_window_1m if is_taker
+        taker: Decimal = sum(
+            (notional for _, notional, is_taker in self._rolling_fill_window_1m if is_taker),
+            Decimal("0"),
         )
         return taker / total
 

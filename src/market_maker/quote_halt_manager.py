@@ -12,7 +12,17 @@ the set is non-empty and resumes when all reasons are cleared.
 from __future__ import annotations
 
 import logging
-from typing import Optional, Set
+from typing import Any, Optional, Protocol, Set
+
+
+class _JournalLike(Protocol):
+    def record_exchange_event(self, *, event_type: str, details: Any) -> None: ...
+
+
+class _MetricsLike(Protocol):
+    def set_quote_halt_state(self, reasons: Set[str]) -> None: ...
+    def set_margin_guard_breached(self, breached: bool) -> None: ...
+
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +33,8 @@ class QuoteHaltManager:
     def __init__(
         self,
         market_name: str,
-        journal: object,
-        metrics: object,
+        journal: _JournalLike,
+        metrics: _MetricsLike,
     ) -> None:
         self._market_name = market_name
         self._journal = journal
