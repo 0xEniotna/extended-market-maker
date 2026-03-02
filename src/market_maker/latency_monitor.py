@@ -21,7 +21,7 @@ from decimal import Decimal
 logger = logging.getLogger(__name__)
 
 _DEFAULT_WINDOW_S = 60.0
-_MIN_SAMPLES_FOR_HALT = 5
+_MIN_SAMPLES_FOR_HALT = 10
 _MAX_SAMPLES = 200
 
 
