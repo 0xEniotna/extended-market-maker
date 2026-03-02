@@ -386,13 +386,11 @@ def _run_pnl_json(
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     cmd = [
         sys.executable,
-        str(repo_root / "scripts" / "tools" / "fetch_pnl.py"),
-        market,
-        "--days",
-        "1",
-        "--max-pages",
-        "30",
-        "--json-stdout",
+        "-m", "market_maker.cli",
+        "pnl", market,
+        "--days", "1",
+        "--max-pages", "30",
+        "--json",
     ]
     if env_path:
         cmd.extend(["--env", env_path])
@@ -814,7 +812,7 @@ def _build_launch_action(
 
     commands = [
         f"cp {draft_env_path} {env_target}",
-        f"cd {repo_root} && scripts/mm_openclaw_fleet.sh start {env_target.name}",
+        f"cd {repo_root} && .venv/bin/mmctl start {env_target.name}",
         (
             "# Add OpenClaw cron job for this market (channel routing per your Discord setup):\n"
             f"# openclaw cron add --id mm-{slug} --agent main --schedule 'every 15m' "
@@ -875,9 +873,9 @@ def _build_rotate_action(
 
     commands = [
         f"# Stop underperforming market {from_market} safely first",
-        "# scripts/mm_openclaw_fleet.sh stop <ENV_OF_UNDERPERFORMING_MARKET>",
+        "# mmctl stop <MARKET>",
         f"cp {draft_env_path} {env_target}",
-        f"cd {repo_root} && scripts/mm_openclaw_fleet.sh start {env_target.name}",
+        f"cd {repo_root} && .venv/bin/mmctl start {env_target.name}",
         "# Update cron mapping: disable old market job, add replacement market job",
     ]
 

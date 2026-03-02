@@ -96,17 +96,15 @@ def _run_pnl(
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     cmd = [
         sys.executable,
-        str(repo_root / "scripts" / "tools" / "fetch_pnl.py"),
-        market,
-        "--days",
-        "1",
-        "--max-pages",
-        "30",
-        "--json-stdout",
+        "-m", "market_maker.cli",
+        "pnl", market,
+        "--days", "1",
+        "--max-pages", "30",
+        "--json",
     ]
     if env_path:
         cmd.extend(["--env", env_path])
-    return _json_stdout(cmd, "fetch_pnl")
+    return _json_stdout(cmd, "pnl")
 
 
 def _is_scout_fresh(report_path: Path, action_path: Path, max_age_min: int) -> bool:

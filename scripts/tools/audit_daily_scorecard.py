@@ -52,11 +52,10 @@ def _fetch_total_pnl_snapshot(now_ts: float, lookback_hours: float) -> Dict[str,
     since_ts = datetime.fromtimestamp(now_ts - lookback_hours * 3600.0, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     cmd = [
         str(PROJECT_ROOT / ".venv" / "bin" / "python"),
-        str(PROJECT_ROOT / "scripts" / "tools" / "fetch_total_pnl.py"),
-        "--env",
-        ".env.eth",
-        "--since",
-        since_ts,
+        "-m", "market_maker.cli",
+        "pnl", "--all",
+        "--env", ".env.eth",
+        "--since", since_ts,
         "--include-preexisting-open",
     ]
     proc = subprocess.run(cmd, cwd=str(PROJECT_ROOT), text=True, capture_output=True, timeout=180)

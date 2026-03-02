@@ -16,7 +16,7 @@ from market_maker.mm_config_pipeline import (
     ProposalValidator,
     update_env_lines_preserving_format,
 )
-from market_maker.mmctl import main as mmctl_main
+from market_maker.cli import main as mmctl_main
 
 
 def _write_policy(config_root: Path) -> None:
@@ -287,9 +287,10 @@ def test_mmctl_diff_proposal_command(tmp_path: Path, capsys: pytest.CaptureFixtu
             [
                 "--repo-root",
                 str(repo_root),
+                "config",
                 "--config-root",
                 str(config_root),
-                "diff-proposal",
+                "diff",
                 "prop-diff",
             ]
         )

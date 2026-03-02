@@ -17,11 +17,28 @@ Never:
 - Run arbitrary shell commands outside the allowlist below
 
 ## Whitelisted Commands (ONLY these)
-- `/home/flexouille/bin/mmctl status --json`
-- `/home/flexouille/bin/mmctl status <market> --json`
-- `/home/flexouille/bin/mmctl start <market> --json`
-- `/home/flexouille/bin/mmctl stop <market> --json`
-- `/home/flexouille/bin/mmctl restart <market> --json`
+### Instance management
+- `mmctl status --json`
+- `mmctl status <market> --json`
+- `mmctl start <market> --json`
+- `mmctl stop <market> --json`
+- `mmctl restart <market> --json`
+### PnL
+- `mmctl pnl <market> [--days N] --json`
+- `mmctl pnl --all --since <ts> --json`
+- `mmctl pnl --scorecard --json`
+### Positions & risk
+- `mmctl positions --json`
+- `mmctl close <market> [--dry-run] --json`
+### Markets
+- `mmctl markets info <market> --json`
+- `mmctl markets find --json`
+- `mmctl markets screen --json`
+### Journal
+- `mmctl journal analyze [files...]`
+- `mmctl journal export <market>`
+- `mmctl journal reprice-quality`
+### External triggers
 - `/home/flexouille/bin/mm_scout_run.sh`
 - `MM_SCOUT_PAPER=1 /home/flexouille/bin/mm_scout_run.sh`
 - `ADVISOR_PROPOSALS_ENABLED=0 /home/flexouille/bin/mm_advisor_run.sh`
@@ -126,7 +143,6 @@ After each `.env` write:
 - `pause_quotes`
 - `resume_quotes`
 - `cancel_all`
-- `flatten`
 - `set_param`
 
 If asked for one of these:

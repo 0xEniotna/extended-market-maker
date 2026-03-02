@@ -202,7 +202,7 @@ def run(args: argparse.Namespace) -> int:
             )
         if "stuck_position" in flags:
             recommendations.append(
-                f"{norm_market}: Position appears stuck. Check market activity and consider manual close via close_mm_position.py."
+                f"{norm_market}: Position appears stuck. Check market activity and consider manual close via `mmctl close`."
             )
         if "one_sided_fills" in flags:
             dominant_side = "BUY" if fill_balance > 0.5 else "SELL"

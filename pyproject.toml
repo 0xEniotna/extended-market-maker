@@ -39,7 +39,7 @@ dev = [
 ]
 
 [project.scripts]
-mmctl = "market_maker.mmctl:main"
+mmctl = "market_maker.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

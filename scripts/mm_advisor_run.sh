@@ -149,7 +149,7 @@ fi
   >"${STATE_DIR}/position_risk_${STAMP}.md" 2>"${STATE_DIR}/position_risk_${STAMP}.err" || true
 
 PNL_TXT="/tmp/mm_advisor_pnl_${STAMP}.txt"
-"${PYTHON_BIN}" scripts/tools/fetch_total_pnl.py \
+"${PYTHON_BIN}" -m market_maker.cli pnl --all \
   --env .env.eth \
   --since "$(date -u +%Y-%m-%dT00:00:00Z)" \
   >"${PNL_TXT}" 2>"${STATE_DIR}/fetch_total_pnl_${STAMP}.err" || true

@@ -86,7 +86,6 @@ def _process_market_common(tmp_path: Path, mod, *, market: str, now: float):
 
 def test_cleanup_integrity_no_autotune_reference():
     assert "mm_autotune_loop.py" not in Path("README.md").read_text()
-    assert "mm_autotune_loop.py" not in Path("scripts/mm_openclaw_controller.sh").read_text()
 
 
 def test_deadman_proposal_routes_to_warren(tmp_path: Path):
