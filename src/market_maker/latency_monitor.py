@@ -58,7 +58,7 @@ class LatencyMonitor:
         self,
         *,
         warn_ms: float = 200.0,
-        critical_ms: float = 1000.0,
+        critical_ms: float = 2000.0,
         extra_offset_bps_per_ms: Decimal = Decimal("0.01"),
         max_extra_offset_bps: Decimal = Decimal("5"),
         window_s: float = _DEFAULT_WINDOW_S,
