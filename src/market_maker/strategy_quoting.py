@@ -180,8 +180,18 @@ async def cancel_level_order(
         return False
     s._pending_cancel_reasons[external_id] = reason
     ok = await s._orders.cancel_order(external_id)
+
+    # The websocket may have already delivered terminal status while the
+    # cancel API call was in-flight, causing on_level_freed to clear the
+    # slot.  Only set the pending flag if the slot hasn't been freed yet.
     if ok:
-        s._level_cancel_pending_ext_id[key] = external_id
+        if s._orders.get_active_order(external_id) is not None:
+            s._level_cancel_pending_ext_id[key] = external_id
+        else:
+            # Already terminal — make sure the slot is clear.
+            s._clear_level_slot(key)
+            s._pending_cancel_reasons.pop(external_id, None)
+            return True
         return False
 
     if s._orders.find_order_by_external_id(external_id) is not None:
