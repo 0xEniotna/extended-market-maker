@@ -181,7 +181,12 @@ class RepricePipeline:
 
         if market_ctx.min_reprice_interval_s > 0:
             last_reprice = strategy._level_last_reprice_at.get(level_ctx.key, 0.0)
-            if (now - last_reprice) < market_ctx.min_reprice_interval_s:
+            elapsed = now - last_reprice
+            if elapsed < market_ctx.min_reprice_interval_s:
+                logger.debug(
+                    "Reprice throttled %s L%d: %.1fs since last reprice (min=%.1fs)",
+                    side, level, elapsed, market_ctx.min_reprice_interval_s,
+                )
                 return False
 
         if strategy._ob.is_stale():
@@ -233,8 +238,16 @@ class RepricePipeline:
         bid = strategy._ob.best_bid()
         ask = strategy._ob.best_ask()
         if bid is None or ask is None:
+            logger.debug(
+                "Quote inputs skipped %s L%d: bid=%s ask=%s (missing OB data)",
+                side, level, bid, ask,
+            )
             return None
         if strategy._ob.is_stale():
+            logger.debug(
+                "Quote inputs skipped %s L%d: orderbook stale",
+                side, level,
+            )
             return None
 
         spread_bps = strategy._ob.spread_bps()

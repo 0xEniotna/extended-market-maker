@@ -65,6 +65,8 @@ async def level_task(s: Any, side: OrderSide, level: int) -> None:
         else s._ob.best_ask_condition
     )
 
+    _cancel_wait_logged_at: dict[tuple[str, int], float] = {}
+
     while not s._shutdown_event.is_set():
         sync_quote_halt_state(s)
         if s._circuit_open:
@@ -73,7 +75,16 @@ async def level_task(s: Any, side: OrderSide, level: int) -> None:
         if s._quote_halt_reasons:
             await asyncio.sleep(0.2)
             continue
-        if s._level_cancel_pending_ext_id.get(key) is not None:
+        pending_ext = s._level_cancel_pending_ext_id.get(key)
+        if pending_ext is not None:
+            _now = time.monotonic()
+            _last_log = _cancel_wait_logged_at.get(key, 0.0)
+            if (_now - _last_log) > 10.0:
+                logger.debug(
+                    "Level %s L%d waiting for cancel of %s",
+                    side, level, pending_ext,
+                )
+                _cancel_wait_logged_at[key] = _now
             await asyncio.sleep(0.1)
             continue
 
