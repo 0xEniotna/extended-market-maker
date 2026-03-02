@@ -65,6 +65,9 @@ def _configure_logging(settings: MarketMakerSettings) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         stream=sys.stdout,
     )
+    # Silence noisy third-party loggers when running at DEBUG.
+    for noisy in ("websockets", "websockets.client", "x10.utils.http"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 def _log_startup(settings: MarketMakerSettings) -> None:
