@@ -9,12 +9,17 @@ attempt (applied/failed/skipped).
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
+import os
 import re
 import sys
+import tempfile
+import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TOOLS_DIR = PROJECT_ROOT / "scripts" / "tools"
@@ -94,9 +99,55 @@ def _is_pending(proposal_id: str, receipts: List[Dict[str, Any]]) -> bool:
         if str(row.get("proposal_id") or "") != proposal_id:
             continue
         result = str(row.get("result") or "")
-        if result in {"applied", "failed", "skipped"}:
+        if result in {"applied", "failed"}:
+            return False
+        if result == "skipped" and str(row.get("failure_reason") or "") == "already_at_proposed":
             return False
     return True
+
+
+@contextmanager
+def _env_file_lock(env_file: Path, timeout_s: float = 10.0, poll_s: float = 0.05) -> Iterator[None]:
+    lock_path = env_file.with_name(env_file.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock_fh:
+        start = time.monotonic()
+        while True:
+            try:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() - start >= timeout_s:
+                    raise TimeoutError(f"Timeout acquiring env lock: {lock_path}")
+                time.sleep(poll_s)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, path)
+        try:
+            dir_fd = os.open(str(path.parent), os.O_DIRECTORY)
+        except OSError:
+            dir_fd = None
+        if dir_fd is not None:
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
 
 
 def _is_applyable_row(row: Dict[str, Any], protected_keys: set[str]) -> Tuple[bool, str]:
@@ -377,7 +428,10 @@ def _apply_one(
     except Exception:
         return finish("failed", "env_read_failed")
 
-    env_before_hash = _env_hash(env_path)
+    try:
+        env_before_hash = _env_hash(env_path)
+    except Exception:
+        env_before_hash = None
     param = str(proposal.get("param") or "")
     proposed_value = str(proposal.get("proposed"))
     old_value = proposal.get("old")
@@ -406,12 +460,40 @@ def _apply_one(
         return finish("skipped", "dry_run")
 
     try:
-        env_path.write_text(new_text)
+        with _env_file_lock(env_path):
+            locked_lines = read_env_lines(env_path)
+            locked_map = parse_env(locked_lines)
+            locked_current = locked_map.get(param)
+
+            # Re-check under lock to avoid stale reads across concurrent agents.
+            if _values_match(locked_current, proposed_value):
+                env_before_hash = _env_hash(env_path)
+                env_after_hash = env_before_hash
+                return finish("skipped", "already_at_proposed")
+
+            if old_value is not None and not allow_old_mismatch:
+                if not _values_match(locked_current, old_value):
+                    env_before_hash = _env_hash(env_path)
+                    env_after_hash = env_before_hash
+                    return finish("failed", "current_value_mismatch")
+
+            locked_updated_lines = update_env_lines(locked_lines, {param: proposed_value})
+            locked_new_text = "\n".join(locked_updated_lines).rstrip("\n") + "\n"
+            locked_old_text = "\n".join(locked_lines).rstrip("\n") + "\n"
+            env_before_hash = _env_hash(env_path)
+
+            if locked_new_text == locked_old_text:
+                env_after_hash = env_before_hash
+                return finish("skipped", "already_at_proposed")
+
+            _atomic_write_text(env_path, locked_new_text)
+            env_after_hash = _env_hash(env_path)
+    except TimeoutError:
+        env_after_hash = env_before_hash
+        return finish("failed", "env_lock_timeout")
     except Exception:
         env_after_hash = env_before_hash
         return finish("failed", "env_write_failed")
-
-    env_after_hash = _env_hash(env_path)
     return finish("applied", None)
 
 

@@ -18,7 +18,6 @@
     "fill_rate_pct_lt": 0.5
   },
   "launch": {
-    "max_new_per_day": 4,
     "max_new_per_run": 2,
     "max_total_live_markets": null,
     "launch_size_multiplier": 0.25,

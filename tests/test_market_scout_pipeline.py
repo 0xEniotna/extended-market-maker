@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import sys
 from decimal import Decimal
 from pathlib import Path
 
@@ -197,3 +199,604 @@ def test_render_markdown_includes_active_config_snapshot_section():
     assert "ETH-USD" in md
     assert "0.35" in md
     assert "MM_TOXICITY_MARKOUT_BPS" in md
+
+
+def test_render_markdown_includes_methodology_and_full_screen_output():
+    mod = _load_module(Path("scripts/tools/market_scout_pipeline.py"), "market_scout_pipeline_mod6")
+
+    report = {
+        "generated_at": "2026-03-01T15:00:00Z",
+        "data_quality": {"ok": True, "issues": [], "default_env": ".env.eth"},
+        "rate_limits": {
+            "proposed_launches_last24h": 0,
+            "max_new_per_day": 4,
+            "max_new_per_run": 2,
+            "launch_slots_this_run": 2,
+        },
+        "active_markets": [],
+        "candidate_markets": [],
+        "methodology": {
+            "scoring": {
+                "source": "scripts/screen_mm_markets.py::score_market",
+                "score_formula": "score = spread_score + tick_score + vol_score + oi_score + cov_score",
+                "hard_liquidity_floor": "if daily_vol < 1000 then score = -1",
+                "components": {
+                    "spread_score": {"rule": "spread rule", "max_points": 5},
+                    "tick_score": {"rule": "tick rule", "max_points": 3},
+                    "vol_score": {"rule": "vol rule", "max_points": 4},
+                    "oi_score": {"rule": "oi rule", "max_points": 3},
+                    "cov_score": {"rule": "cov rule", "max_points": 4},
+                },
+            },
+            "candidate_filtering": {
+                "find_stage_source": "scripts/tools/find_mm_markets.py",
+                "screen_stage_source": "scripts/screen_mm_markets.py",
+                "find_stage_filters": {"min_spread_bps": 6, "max_spread_bps": 40},
+                "pipeline_gates": {"min_score": 12.5, "pass_rule": "all gate flags must be true"},
+                "ranking_rule": "Candidates sorted by (passes_all_gates desc, score desc).",
+            },
+        },
+        "raw_inputs": {
+            "screen_command_output": {
+                "command_text": "python scripts/screen_mm_markets.py --json-stdout",
+                "returncode": 0,
+                "stdout": "line1\nline2\n",
+                "stderr": "warn\n",
+            }
+        },
+    }
+    md = mod._render_markdown(report, [])
+    assert "## Methodology" in md
+    assert "scripts/screen_mm_markets.py::score_market" in md
+    assert "## Full screen_mm_markets.py Output" in md
+    assert "line1" in md
+    assert "warn" in md
+
+
+def test_render_markdown_hides_daily_launch_cap_when_disabled():
+    mod = _load_module(Path("scripts/tools/market_scout_pipeline.py"), "market_scout_pipeline_mod7")
+
+    report = {
+        "generated_at": "2026-03-01T16:00:00Z",
+        "data_quality": {"ok": True, "issues": []},
+        "rate_limits": {
+            "max_new_per_run": 2,
+            "launch_slots_this_run": 2,
+        },
+        "active_markets": [],
+        "candidate_markets": [],
+    }
+
+    md = mod._render_markdown(report, [])
+    assert "daily_launch_cap: disabled" in md
+    assert "max_new_per_day:" not in md
+    assert "proposed_launches_last24h:" not in md
+
+
+def test_build_candidate_pool_with_paper_stage_applies_stageb_gates_and_score2():
+    mod = _load_module(Path("scripts/tools/market_scout_pipeline.py"), "market_scout_pipeline_mod8")
+
+    find_payload = {"markets": [{"name": "AAA-USD"}, {"name": "BBB-USD"}]}
+    screen_payload = {
+        "markets": [
+            {
+                "name": "AAA-USD",
+                "score": "10.0",
+                "ticks_in_spread": "5",
+                "coverage_3bps_pct": "95",
+                "spread_bps_p90": "20",
+                "spread_bps": "10",
+                "daily_vol": "500000",
+                "oi": "200000",
+            },
+            {
+                "name": "BBB-USD",
+                "score": "9.0",
+                "ticks_in_spread": "5",
+                "coverage_3bps_pct": "95",
+                "spread_bps_p90": "20",
+                "spread_bps": "10",
+                "daily_vol": "500000",
+                "oi": "200000",
+            },
+        ]
+    }
+    policy = {
+        "candidate_gates": {
+            "min_score": 0,
+            "min_ticks_in_spread": 0,
+            "min_coverage_pct": 0,
+            "max_spread_p90_bps": 0,
+            "min_daily_volume": 0,
+        }
+    }
+    paper_stats = {
+        "AAA-USD": {
+            "paper_fills": 35,
+            "paper_fill_rate_per_min": 4.2,
+            "paper_fill_rate_per_min_adjusted": 0.84,
+            "paper_markout_bps_250ms_mean": 0.5,
+            "paper_markout_bps_1s_mean": 1.0,
+            "paper_toxicity_share_250ms": 0.45,
+            "paper_toxicity_share_1s": 0.40,
+        },
+        "BBB-USD": {
+            "paper_fills": 35,
+            "paper_fill_rate_per_min": 4.2,
+            "paper_fill_rate_per_min_adjusted": 0.84,
+            "paper_markout_bps_250ms_mean": -2.0,
+            "paper_markout_bps_1s_mean": -3.0,
+            "paper_toxicity_share_250ms": 0.90,
+            "paper_toxicity_share_1s": 0.80,
+        },
+    }
+    paper_cfg = {
+        "min_fills": mod.Decimal("20"),
+        "max_toxicity_250ms": mod.Decimal("0.60"),
+        "min_markout_250ms": mod.Decimal("-1.0"),
+        "min_markout_1s": mod.Decimal("-1.0"),
+        "markout_shift_bps": mod.Decimal("2.0"),
+        "markout_scale_bps": mod.Decimal("2.0"),
+        "markout_max_score": mod.Decimal("3.0"),
+        "toxicity_center": mod.Decimal("0.5"),
+        "toxicity_scale": mod.Decimal("6.0"),
+        "toxicity_max_penalty": mod.Decimal("3.0"),
+    }
+
+    rows = mod._build_candidate_pool(
+        find_payload=find_payload,
+        screen_payload=screen_payload,
+        policy=policy,
+        paper_enabled=True,
+        paper_stats=paper_stats,
+        paper_cfg=paper_cfg,
+    )
+
+    assert rows[0]["market"] == "AAA-USD"
+    assert rows[0]["stageA_pass"] is True
+    assert rows[0]["stageB_pass"] is True
+    assert rows[0]["passes_all_gates"] is True
+    assert rows[0]["score2"] > rows[0]["score"]
+
+    bbb = next(row for row in rows if row["market"] == "BBB-USD")
+    assert bbb["stageA_pass"] is True
+    assert bbb["stageB_pass"] is False
+    assert bbb["passes_all_gates"] is False
+
+
+def test_render_markdown_includes_paper_markout_section_when_enabled():
+    mod = _load_module(Path("scripts/tools/market_scout_pipeline.py"), "market_scout_pipeline_mod9")
+    report = {
+        "generated_at": "2026-03-01T18:00:00Z",
+        "data_quality": {"ok": True, "issues": []},
+        "rate_limits": {
+            "max_new_per_run": 2,
+            "launch_slots_this_run": 1,
+        },
+        "active_markets": [],
+        "candidate_markets": [
+            {
+                "market": "AAA-USD",
+                "score": "10.0",
+                "score2": "11.2",
+                "spread_bps": "8.5",
+                "spread_p90_bps": "12.0",
+                "coverage_pct": "95",
+                "ticks_in_spread": "5",
+                "stageA_pass": True,
+                "stageB_pass": True,
+                "passes_all_gates": True,
+                "paper_fills": 30,
+                "paper_fill_rate_per_min": 3.5,
+                "paper_markout_250ms_bps": 0.3,
+                "paper_markout_1s_bps": 0.8,
+                "paper_toxicity_250ms": 0.45,
+                "paper_toxicity_1s": 0.4,
+            }
+        ],
+        "paper_markout": {
+            "enabled": True,
+            "target_markets": ["AAA-USD"],
+            "sampled_markets": ["AAA-USD"],
+            "duration_s": 300,
+            "horizons_ms": [250, 1000],
+            "warnings": [],
+        },
+        "paper_markout_rows": [
+            {
+                "market": "AAA-USD",
+                "paper_fills": 30,
+                "paper_fill_rate_per_min": 3.5,
+                "paper_markout_250ms_bps": 0.3,
+                "paper_markout_1s_bps": 0.8,
+                "paper_toxicity_250ms": 0.45,
+                "paper_toxicity_1s": 0.4,
+            }
+        ],
+    }
+
+    md = mod._render_markdown(report, [])
+    assert "## Paper Markout (Stage B)" in md
+    assert "paper_fill_rate/min" in md
+    assert "AAA-USD" in md
+
+
+def test_build_candidate_pool_marks_unsampled_markets_as_stageb_na():
+    mod = _load_module(Path("scripts/tools/market_scout_pipeline.py"), "market_scout_pipeline_mod10")
+
+    find_payload = {"markets": [{"name": "AAA-USD"}, {"name": "BBB-USD"}]}
+    screen_payload = {
+        "markets": [
+            {
+                "name": "AAA-USD",
+                "score": "10.0",
+                "ticks_in_spread": "5",
+                "coverage_3bps_pct": "95",
+                "spread_bps_p90": "20",
+                "spread_bps": "10",
+                "daily_vol": "500000",
+                "oi": "200000",
+            },
+            {
+                "name": "BBB-USD",
+                "score": "9.0",
+                "ticks_in_spread": "5",
+                "coverage_3bps_pct": "95",
+                "spread_bps_p90": "20",
+                "spread_bps": "10",
+                "daily_vol": "500000",
+                "oi": "200000",
+            },
+        ]
+    }
+    policy = {
+        "candidate_gates": {
+            "min_score": 0,
+            "min_ticks_in_spread": 0,
+            "min_coverage_pct": 0,
+            "max_spread_p90_bps": 0,
+            "min_daily_volume": 0,
+        }
+    }
+    paper_cfg = {
+        "min_fills": mod.Decimal("20"),
+        "max_toxicity_250ms": mod.Decimal("0.60"),
+        "min_markout_250ms": mod.Decimal("-1.0"),
+        "min_markout_1s": mod.Decimal("-1.0"),
+        "markout_shift_bps": mod.Decimal("2.0"),
+        "markout_scale_bps": mod.Decimal("2.0"),
+        "markout_max_score": mod.Decimal("3.0"),
+        "toxicity_center": mod.Decimal("0.5"),
+        "toxicity_scale": mod.Decimal("6.0"),
+        "toxicity_max_penalty": mod.Decimal("3.0"),
+    }
+    rows = mod._build_candidate_pool(
+        find_payload=find_payload,
+        screen_payload=screen_payload,
+        policy=policy,
+        paper_enabled=True,
+        paper_stats={
+            "AAA-USD": {
+                "paper_fills": 35,
+                "paper_markout_bps_250ms_mean": 0.5,
+                "paper_markout_bps_1s_mean": 1.0,
+                "paper_toxicity_share_250ms": 0.4,
+                "paper_toxicity_share_1s": 0.4,
+            }
+        },
+        paper_cfg=paper_cfg,
+        paper_sampled_markets={"AAA-USD"},
+    )
+
+    bbb = next(row for row in rows if row["market"] == "BBB-USD")
+    assert bbb["paper_sampled"] is False
+    assert bbb["stageA_pass"] is True
+    assert bbb["stageB_pass"] is None
+    assert bbb["passes_all_gates"] is False
+    assert bbb["paper_fills"] is None
+
+
+def test_summarize_paper_health_marks_degraded_on_zero_fills_with_activity():
+    mod = _load_module(Path("scripts/tools/market_scout_pipeline.py"), "market_scout_pipeline_mod11")
+    summary = mod._summarize_paper_health(
+        ["AAA-USD"],
+        {
+            "AAA-USD": {
+                "paper_fills": 0,
+                "paper_trade_rows_seen": 42,
+                "paper_trade_rows_used": 10,
+                "paper_bbo_updates_seen": 100,
+                "paper_bbo_ready": True,
+            }
+        },
+    )
+    assert summary["degraded"] is True
+    assert summary["total_trade_rows_seen"] == 42
+    assert summary["total_bbo_updates_seen"] == 100
+
+
+def test_build_methodology_uses_score_ranking_when_paper_scoring_disabled():
+    mod = _load_module(Path("scripts/tools/market_scout_pipeline.py"), "market_scout_pipeline_mod12")
+    method = mod._build_methodology(
+        policy={"candidate_gates": {}},
+        find_duration_s=30.0,
+        screen_duration_s=60.0,
+        scan_interval_s=2.0,
+        paper_meta={
+            "enabled": True,
+            "duration_s": 300.0,
+            "top_k": 10,
+            "horizons_ms": [250, 1000],
+            "queue_capture": 0.2,
+            "bbo_match_mode": "strict",
+            "include_trade_types": ["TRADE"],
+            "gates": {},
+            "score_weights": {},
+        },
+        paper_scoring_enabled=False,
+    )
+    filtering = method["candidate_filtering"]
+    assert filtering["ranking_rule"] == "Candidates sorted by (passes_all_gates desc, score desc)."
+
+
+def test_render_markdown_shows_paper_fallback_notice():
+    mod = _load_module(Path("scripts/tools/market_scout_pipeline.py"), "market_scout_pipeline_mod13")
+    report = {
+        "generated_at": "2026-03-01T18:00:00Z",
+        "data_quality": {"ok": True, "issues": []},
+        "rate_limits": {
+            "max_new_per_run": 2,
+            "launch_slots_this_run": 1,
+        },
+        "active_markets": [],
+        "candidate_markets": [
+            {
+                "market": "AAA-USD",
+                "score": "10.0",
+                "spread_bps": "8.5",
+                "spread_p90_bps": "12.0",
+                "coverage_pct": "95",
+                "ticks_in_spread": "5",
+                "passes_all_gates": True,
+            }
+        ],
+        "paper_markout": {
+            "enabled": True,
+            "scoring_enabled": False,
+            "degraded": True,
+            "fallback_applied": True,
+            "target_markets": ["AAA-USD"],
+            "sampled_markets": ["AAA-USD"],
+            "duration_s": 300,
+            "horizons_ms": [250, 1000],
+            "health_summary": {
+                "total_paper_fills": 0,
+                "total_trade_rows_seen": 12,
+                "total_trade_rows_used": 0,
+                "total_bbo_updates_seen": 5,
+                "markets_with_bbo_ready": 1,
+                "sampled_market_count": 1,
+            },
+            "warnings": ["paper_markout_degraded_fallback_stageA"],
+        },
+        "paper_markout_rows": [
+            {
+                "market": "AAA-USD",
+                "paper_fills": 0,
+                "paper_fill_rate_per_min": 0.0,
+                "paper_markout_250ms_bps": None,
+                "paper_markout_1s_bps": None,
+                "paper_toxicity_250ms": None,
+                "paper_toxicity_1s": None,
+            }
+        ],
+    }
+
+    md = mod._render_markdown(report, [])
+    assert "fallback: Stage A gating/ranking applied for this run" in md
+    assert "degraded: `True`" in md
+
+
+def _write_json(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload))
+
+
+def _base_policy_payload() -> dict:
+    return {
+        "candidate_gates": {
+            "min_score": 0,
+            "min_ticks_in_spread": 0,
+            "min_coverage_pct": 0,
+            "max_spread_p90_bps": 0,
+            "min_daily_volume": 0,
+            "min_spread_bps": 0,
+            "max_spread_bps": 999,
+        },
+        "launch": {"max_new_per_run": 1, "max_new_per_day": 1},
+        "rotation": {"min_score_delta": 1.0, "underperformance_cycles": 99},
+    }
+
+
+def _find_and_screen_payloads() -> tuple[dict, dict]:
+    find_payload = {"markets": [{"name": "AAA-USD"}, {"name": "BBB-USD"}], "count": 2}
+    screen_payload = {
+        "markets": [
+            {
+                "name": "AAA-USD",
+                "score": "10.0",
+                "ticks_in_spread": "4",
+                "coverage_3bps_pct": "90",
+                "spread_bps_p90": "20",
+                "spread_bps": "10",
+                "daily_vol": "500000",
+                "oi": "200000",
+            },
+            {
+                "name": "BBB-USD",
+                "score": "9.0",
+                "ticks_in_spread": "4",
+                "coverage_3bps_pct": "90",
+                "spread_bps_p90": "20",
+                "spread_bps": "10",
+                "daily_vol": "500000",
+                "oi": "200000",
+            },
+        ],
+        "count": 2,
+    }
+    return find_payload, screen_payload
+
+
+def _stub_run_json_stdout(find_payload: dict, screen_payload: dict):
+    def _inner(cmd, label, run_env=None, timeout_s=300.0):  # noqa: ARG001
+        if label == "find_mm_markets":
+            return find_payload, {"label": label, "returncode": 0, "command_text": "find"}
+        if label == "screen_mm_markets":
+            return screen_payload, {"label": label, "returncode": 0, "command_text": "screen"}
+        raise AssertionError(f"Unexpected label: {label}")
+
+    return _inner
+
+
+def test_main_degraded_stageb_falls_back_to_stagea_by_default(tmp_path: Path, monkeypatch):
+    mod = _load_module(Path("scripts/tools/market_scout_pipeline.py"), "market_scout_pipeline_mod14")
+    find_payload, screen_payload = _find_and_screen_payloads()
+
+    repo_root = tmp_path / "repo"
+    output_dir = repo_root / "out"
+    policy_path = repo_root / "policy.json"
+    jobs_path = tmp_path / "jobs.json"
+    _write_json(policy_path, _base_policy_payload())
+    _write_json(jobs_path, {"jobs": []})
+
+    monkeypatch.setattr(mod, "_run_json_stdout", _stub_run_json_stdout(find_payload, screen_payload))
+
+    import market_maker.scout.paper_markout as paper_markout
+
+    def _fake_run_paper_markout(**kwargs):  # noqa: ARG001
+        return {
+            "AAA-USD": {
+                "paper_fills": 0,
+                "paper_trade_rows_seen": 25,
+                "paper_trade_rows_used": 0,
+                "paper_bbo_updates_seen": 40,
+                "paper_bbo_ready": True,
+            }
+        }
+
+    monkeypatch.setattr(paper_markout, "run_paper_markout", _fake_run_paper_markout)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "market_scout_pipeline.py",
+            "--repo-root",
+            str(repo_root),
+            "--jobs-json",
+            str(jobs_path),
+            "--policy",
+            "policy.json",
+            "--output-dir",
+            "out",
+            "--paper-markout",
+            "--paper-top-k",
+            "1",
+        ],
+    )
+
+    rc = mod.main()
+    assert rc == 0
+
+    report = json.loads((output_dir / "market_scout_report.json").read_text())
+    paper = report["paper_markout"]
+    issues = report["data_quality"]["issues"]
+    candidates = report["candidate_markets"]
+
+    assert paper["degraded"] is True
+    assert paper["fallback_applied"] is True
+    assert paper["scoring_enabled"] is False
+    assert "paper_markout_degraded_fallback_stageA" in paper["warnings"]
+    assert "paper_markout_fallback_stageA" in issues
+
+    aaa = next(row for row in candidates if row["market"] == "AAA-USD")
+    assert aaa["passes_all_gates"] is True
+    assert "stageB_pass" not in aaa
+
+
+def test_main_degraded_stageb_strict_mode_keeps_stageb_enforcement(tmp_path: Path, monkeypatch):
+    mod = _load_module(Path("scripts/tools/market_scout_pipeline.py"), "market_scout_pipeline_mod15")
+    find_payload, screen_payload = _find_and_screen_payloads()
+
+    repo_root = tmp_path / "repo"
+    output_dir = repo_root / "out"
+    policy_path = repo_root / "policy.json"
+    jobs_path = tmp_path / "jobs.json"
+    _write_json(policy_path, _base_policy_payload())
+    _write_json(jobs_path, {"jobs": []})
+
+    monkeypatch.setattr(mod, "_run_json_stdout", _stub_run_json_stdout(find_payload, screen_payload))
+
+    import market_maker.scout.paper_markout as paper_markout
+
+    def _fake_run_paper_markout(**kwargs):  # noqa: ARG001
+        return {
+            "AAA-USD": {
+                "paper_fills": 0,
+                "paper_trade_rows_seen": 11,
+                "paper_trade_rows_used": 0,
+                "paper_bbo_updates_seen": 5,
+                "paper_bbo_ready": True,
+                "paper_markout_bps_250ms_mean": None,
+                "paper_markout_bps_1s_mean": None,
+                "paper_toxicity_share_250ms": None,
+                "paper_toxicity_share_1s": None,
+            }
+        }
+
+    monkeypatch.setattr(paper_markout, "run_paper_markout", _fake_run_paper_markout)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "market_scout_pipeline.py",
+            "--repo-root",
+            str(repo_root),
+            "--jobs-json",
+            str(jobs_path),
+            "--policy",
+            "policy.json",
+            "--output-dir",
+            "out",
+            "--paper-markout",
+            "--paper-top-k",
+            "1",
+            "--paper-fallback-mode",
+            "strict",
+        ],
+    )
+
+    rc = mod.main()
+    assert rc == 0
+
+    report = json.loads((output_dir / "market_scout_report.json").read_text())
+    paper = report["paper_markout"]
+    issues = report["data_quality"]["issues"]
+    candidates = report["candidate_markets"]
+
+    assert paper["degraded"] is True
+    assert paper["fallback_applied"] is False
+    assert paper["scoring_enabled"] is True
+    assert "paper_markout_degraded_strict_mode" in paper["warnings"]
+    assert "paper_markout_degraded" in issues
+
+    aaa = next(row for row in candidates if row["market"] == "AAA-USD")
+    bbb = next(row for row in candidates if row["market"] == "BBB-USD")
+    assert aaa["paper_sampled"] is True
+    assert aaa["stageB_pass"] is False
+    assert aaa["passes_all_gates"] is False
+    assert bbb["paper_sampled"] is False
+    assert bbb["stageB_pass"] is None
+    assert bbb["passes_all_gates"] is False

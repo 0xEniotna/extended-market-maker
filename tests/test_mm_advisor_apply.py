@@ -165,6 +165,48 @@ def test_missing_approval_skips_and_preserves_env(tmp_path: Path):
     assert receipts[0]["failure_reason"] == "approval_required"
 
 
+def test_missing_approval_keeps_proposal_pending(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    mod = _load_module()
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    env = repo / ".env.sol"
+    _write_env(env, market="SOL-USD", spread="1.0")
+
+    proposals = repo / "data/mm_audit/advisor/proposals.jsonl"
+    proposals.parent.mkdir(parents=True, exist_ok=True)
+    proposals.write_text(
+        json.dumps(
+            _proposal_row(
+                proposal_id="sol-pending-1",
+                ts=1000.0,
+                market="SOL-USD",
+                env_path=env,
+                param="MM_SPREAD_MULTIPLIER",
+                old="1.0",
+                proposed="1.1",
+            )
+        )
+        + "\n"
+    )
+
+    rc = mod.main(["--repo", str(repo), "--proposal-id", "sol-pending-1", "--json"])
+    assert rc == 1
+
+    _ = capsys.readouterr()
+    rc = mod.main(["--repo", str(repo), "--list-pending", "--json"])
+    assert rc == 0
+    out = capsys.readouterr().out.strip()
+    payload = json.loads(out)
+    assert payload["pending"] == 1
+    assert payload["results"][0]["proposal_id"] == "sol-pending-1"
+
+    receipts = _read_jsonl(repo / "data/mm_audit/advisor/apply_receipts.jsonl")
+    assert len(receipts) == 1
+    assert receipts[0]["failure_reason"] == "approval_required"
+
+
 def test_warren_auto_mode_applies_deadman_only(tmp_path: Path):
     mod = _load_module()
     repo = tmp_path / "repo"
@@ -297,7 +339,9 @@ def test_numeric_old_value_equivalence_does_not_fail(tmp_path: Path):
     assert receipts[0]["result"] == "applied"
 
 
-def test_stale_old_but_already_at_target_is_skipped(tmp_path: Path):
+def test_stale_old_but_already_at_target_is_skipped(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     mod = _load_module()
     repo = tmp_path / "repo"
     repo.mkdir(parents=True, exist_ok=True)
@@ -329,6 +373,12 @@ def test_stale_old_but_already_at_target_is_skipped(tmp_path: Path):
     assert len(receipts) == 1
     assert receipts[0]["result"] == "skipped"
     assert receipts[0]["failure_reason"] == "already_at_proposed"
+
+    _ = capsys.readouterr()
+    rc = mod.main(["--repo", str(repo), "--list-pending", "--json"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out.strip())
+    assert out["pending"] == 0
 
 
 def test_unknown_proposal_id_returns_nonzero(tmp_path: Path):
