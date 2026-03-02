@@ -21,6 +21,7 @@ from decimal import Decimal
 logger = logging.getLogger(__name__)
 
 _DEFAULT_WINDOW_S = 60.0
+_MIN_SAMPLES_FOR_HALT = 5
 _MAX_SAMPLES = 200
 
 
@@ -106,8 +107,10 @@ class LatencyMonitor:
         halt = False
         degraded = False
 
-        if p95 >= self._critical_ms:
+        if p95 >= self._critical_ms and len(values) >= _MIN_SAMPLES_FOR_HALT:
             halt = True
+            degraded = True
+        elif p95 >= self._critical_ms:
             degraded = True
         elif p95 >= self._warn_ms:
             degraded = True
