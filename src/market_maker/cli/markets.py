@@ -44,10 +44,10 @@ def _resolve_api_base(api_base: Optional[str]) -> str:
     explicit = os.getenv("EXTENDED_API_BASE", "").strip()
     if explicit:
         return explicit.rstrip("/")
-    env = (os.getenv("MM_ENVIRONMENT") or os.getenv("EXTENDED_ENV") or "testnet").strip().lower()
-    if env == "mainnet":
-        return MAINNET_API_BASE
-    return TESTNET_API_BASE
+    env = (os.getenv("MM_ENVIRONMENT") or os.getenv("EXTENDED_ENV") or "mainnet").strip().lower()
+    if env == "testnet":
+        return TESTNET_API_BASE
+    return MAINNET_API_BASE
 
 
 def _fetch_market(api_base: str, market_name: str) -> Dict[str, Any]:
