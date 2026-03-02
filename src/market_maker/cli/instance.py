@@ -134,7 +134,7 @@ def _start_instance(env_label: str) -> Dict[str, Any]:
 
     with open(log_file, "a") as log_fh:
         proc = subprocess.Popen(
-            [python_bin, "-m", "market_maker.strategy"],
+            [python_bin, "-m", "market_maker"],
             env=proc_env,
             cwd=str(PROJECT_ROOT),
             stdout=log_fh,
