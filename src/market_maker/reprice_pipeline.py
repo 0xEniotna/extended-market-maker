@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from decimal import Decimal
@@ -13,6 +14,8 @@ from .reprice_execution import (
     execute_replace_if_needed as _execute_replace,
 )
 from .types import StrategyContext
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
