@@ -36,6 +36,19 @@ def _fmt(value: Any) -> str:
     return str(value)
 
 
+def _load_env(args) -> None:
+    """Load the .env file specified by --env, or the default .env."""
+    env_file = getattr(args, "env", None)
+    if env_file:
+        path = Path(env_file)
+        if not path.exists():
+            print(f"Warning: env file {path} not found", file=sys.stderr)
+        else:
+            load_dotenv(path, override=True)
+    else:
+        load_dotenv()
+
+
 def _resolve_api_base(api_base: Optional[str]) -> str:
     from market_maker.public_markets import MAINNET_API_BASE, TESTNET_API_BASE
 
@@ -81,7 +94,7 @@ def _fetch_market(api_base: str, market_name: str) -> Dict[str, Any]:
 
 
 def _run_market_info(args) -> int:
-    load_dotenv()
+    _load_env(args)
     api_base = _resolve_api_base(getattr(args, "api_base", None))
     market = _fetch_market(api_base, args.info_market)
 
@@ -136,6 +149,7 @@ def _run_market_info(args) -> int:
 
 
 def _run_markets_find(args) -> int:
+    _load_env(args)
     scripts_tools = PROJECT_ROOT / "scripts" / "tools"
     if str(scripts_tools) not in sys.path:
         sys.path.insert(0, str(scripts_tools))
@@ -169,6 +183,7 @@ def _run_markets_find(args) -> int:
 
 
 def _run_markets_screen(args) -> int:
+    _load_env(args)
     scripts_dir = PROJECT_ROOT / "scripts"
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
@@ -207,6 +222,7 @@ def register(subparsers) -> None:
     info_p.add_argument("info_market", metavar="market", help="Market name (e.g. ETH-USD)")
     info_p.add_argument("--json", action="store_true", help="Raw JSON output")
     info_p.add_argument("--api-base", default=None, help="Override API base URL")
+    info_p.add_argument("--env", default=None, help="Path to .env file (e.g. .env.eth)")
     info_p.set_defaults(func=_run_market_info)
 
     # find
@@ -216,6 +232,7 @@ def register(subparsers) -> None:
     find_p.add_argument("--interval-s", type=float, default=2.0, help="Snapshot interval seconds")
     find_p.add_argument("--limit", type=int, default=40, help="Max rows")
     find_p.add_argument("--api-base", default=None, help="Override API base URL")
+    find_p.add_argument("--env", default=None, help="Path to .env file (e.g. .env.eth)")
     find_p.set_defaults(func=_run_markets_find)
 
     # screen
@@ -224,6 +241,7 @@ def register(subparsers) -> None:
     screen_p.add_argument("--duration-s", type=float, default=180.0, help="Sampling window seconds")
     screen_p.add_argument("--limit", type=int, default=80, help="Max rows")
     screen_p.add_argument("--api-base", default=None, help="Override API base URL")
+    screen_p.add_argument("--env", default=None, help="Path to .env file (e.g. .env.eth)")
     screen_p.set_defaults(func=_run_markets_screen)
 
     markets_parser.set_defaults(func=lambda args: _markets_help(markets_parser, args))
