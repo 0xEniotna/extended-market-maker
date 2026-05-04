@@ -385,8 +385,13 @@ class TestPendingPlacementBuffer:
 
     @pytest.mark.asyncio
     async def test_stream_terminal_before_place_order_returns(self):
-        """Stream delivers FILLED before place_order HTTP returns.
-        The order should still be properly tracked in recent."""
+        """Stream delivers FILLED *during* the place_order HTTP await.
+
+        place_order must NOT re-add the (already-terminal) ext_id to
+        _active_orders, which would create a ghost entry and cause the
+        slot-leak race observed on 2026-05-04 (15+ concurrent orders at
+        a single level slot).
+        """
         mgr = _make_manager()
         callback_calls = []
 
@@ -397,8 +402,7 @@ class TestPendingPlacementBuffer:
 
         async def _slow_place(**kwargs):
             ext_id = kwargs["external_id"]
-
-            # Stream delivers FILLED before we return
+            # Stream delivers FILLED before we return.
             mgr.handle_order_update(
                 SimpleNamespace(
                     external_id=ext_id,
@@ -407,7 +411,6 @@ class TestPendingPlacementBuffer:
                     status_reason=None,
                 )
             )
-
             return SimpleNamespace(
                 status="OK",
                 error=None,
@@ -423,15 +426,78 @@ class TestPendingPlacementBuffer:
             level=1,
         )
 
-        assert result_ext_id is not None
-        # Should be in active (place_order added it back after return)
-        # The key insight: the order was promoted to active and then
-        # removed by handle_order_update's terminal status logic.
-        # But since place_order also adds to active, it ends up there.
-        # The callback should have been fired once.
+        # place_order signals "didn't survive": caller (reprice_execution)
+        # must not track this ext_id on the level slot.
+        assert result_ext_id is None
+        # No ghost entry left behind.
+        assert len(mgr._active_orders) == 0
+        assert len(mgr._pending_placements) == 0
+        # WS handler fired the level-freed callback exactly once.
         assert len(callback_calls) == 1
-        # Should be findable in recent
-        assert mgr.find_order_by_external_id(result_ext_id) is not None
+        # Order is still findable via recent (for diagnostics).
+        recent = list(mgr._recent_orders_by_external_id.keys())
+        assert len(recent) == 1
+        assert mgr.find_order_by_external_id(recent[0]) is not None
+
+    @pytest.mark.asyncio
+    async def test_stream_rejected_before_place_order_returns_no_ghost(self):
+        """POST_ONLY_FAILED arrives via WS during place_order's HTTP await.
+
+        Same root scenario as the FILLED race, but for the more common
+        rejection path. Asserts no ghost in _active_orders and that the
+        on_level_freed callback fires exactly once with rejected=True.
+        """
+        mgr = _make_manager()
+        callback_calls = []
+        mgr.on_level_freed(
+            lambda *a, **kw: callback_calls.append((a, kw))
+        )
+
+        async def _slow_place(**kwargs):
+            ext_id = kwargs["external_id"]
+            mgr.handle_order_update(
+                SimpleNamespace(
+                    external_id=ext_id,
+                    status=OrderStatus.REJECTED,
+                    id=42,
+                    status_reason="POST_ONLY_FAILED",
+                )
+            )
+            return SimpleNamespace(
+                status="OK",
+                error=None,
+                data=SimpleNamespace(id=42),
+            )
+
+        mgr._client.place_order = _slow_place
+
+        result_ext_id = await mgr.place_order(
+            side=OrderSide.BUY,
+            price=Decimal("100"),
+            size=Decimal("1"),
+            level=0,
+        )
+
+        assert result_ext_id is None
+        assert len(mgr._active_orders) == 0
+        assert len(mgr._pending_placements) == 0
+        assert len(callback_calls) == 1
+        cb_kwargs = callback_calls[0][1]
+        assert cb_kwargs.get("rejected") is True
+
+    @pytest.mark.asyncio
+    async def test_stream_terminal_does_not_block_normal_placements(self):
+        """Sanity: when WS does not race, place_order still tracks normally."""
+        mgr = _make_manager()
+        result_ext_id = await mgr.place_order(
+            side=OrderSide.BUY,
+            price=Decimal("100"),
+            size=Decimal("1"),
+            level=0,
+        )
+        assert result_ext_id is not None
+        assert result_ext_id in mgr._active_orders
+        assert result_ext_id in mgr._recent_orders_by_external_id
 
     @pytest.mark.asyncio
     async def test_pending_placement_cleaned_on_failure(self):

@@ -153,6 +153,28 @@ async def place_order(
             if exchange_id is not None and info.exchange_order_id is None:
                 info.exchange_order_id = exchange_id
                 mgr._orders_by_exchange_id[exchange_id] = info
+        elif (
+            external_id in mgr._recent_orders_by_external_id
+            and external_id not in mgr._pending_placements
+        ):
+            # Race: while we were awaiting the place_order HTTP response, the
+            # account-stream WS already delivered a terminal status for this
+            # ext_id (e.g. POST_ONLY_FAILED or instant cancel) and
+            # ``handle_order_update`` popped it from _active_orders / fired
+            # _level_freed_callbacks. Re-adding pending_info here would create
+            # a ghost entry: the level slot has already been freed by the WS
+            # callback, so the next reprice on this slot would place ANOTHER
+            # order while this dead one lingered in _active_orders until the
+            # 10s pending-cancel sweep — exactly the source of the 13-15
+            # concurrent-order leak observed on 2026-05-04.
+            mgr._latency.discard(external_id)
+            mgr.consecutive_failures = 0
+            logger.info(
+                "Place response raced WS terminal: side=%s price=%s level=%d ext_id=%s "
+                "exch_id=%s — order already terminal, not re-tracking",
+                side, price, level, external_id, exchange_id,
+            )
+            return None
         else:
             info = mgr._pending_placements.pop(external_id, pending_info)
             if exchange_id is not None:
