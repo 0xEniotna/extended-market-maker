@@ -40,7 +40,6 @@ from .strategy_components import (
     toxicity_adjustment,
 )
 from .strategy_quoting import (
-    build_reprice_market_context,
     cancel_level_order,
     is_fatal_exception,
     level_task,
@@ -194,11 +193,14 @@ class MarketMakerStrategy:
         await level_task(self, side, level)
 
     async def _maybe_reprice(self, side: OrderSide, level: int) -> None:
-        sync_quote_halt_state(self)
-        if self._quote_halt_reasons:
-            return
-        market_ctx = build_reprice_market_context(self)
-        await self._reprice.evaluate(self, side, level, market_ctx=market_ctx)  # type: ignore[arg-type]
+        # Route through the locked wrapper so the immediate-reprice path
+        # invoked from on_level_freed (via _schedule_reprice_after_cancel)
+        # cannot race the level_task on the same (side, level) slot.
+        # The previous direct ``_reprice.evaluate(...)`` call bypassed the
+        # per-slot lock and was the source of the residual concurrent-orders
+        # leak observed on 2026-05-04 (sibling to the WS-terminal race).
+        from .strategy_quoting import maybe_reprice
+        await maybe_reprice(self, side, level)
 
     def _clear_level_slot(self, key: tuple[str, int]) -> None:
         self._level_ext_ids[key] = None

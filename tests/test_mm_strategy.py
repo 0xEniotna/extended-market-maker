@@ -572,6 +572,75 @@ class TestMarketContextCache:
         s._trend_signal.evaluate.assert_called_once()
 
 
+class TestRepriceLockSerialisation:
+    """Regression for the second concurrent-orders leak (2026-05-04).
+
+    `strategy._maybe_reprice` (invoked by ``_schedule_reprice_after_cancel``
+    from on_level_freed) used to bypass ``_level_reprice_locks`` and call
+    ``_reprice.evaluate`` directly. The level_task uses the locked
+    ``maybe_reprice`` wrapper. Concurrent runs of the two paths placed two
+    orders at the same slot 139 ms apart with no cancel between, leaking
+    up to 5 simultaneous orders per slot in production.
+    """
+
+    @pytest.mark.asyncio
+    async def test_strategy_maybe_reprice_respects_per_slot_lock(self):
+        s = _make_strategy()
+        # Make the underlying evaluate slow so we can observe overlap.
+        evaluate_calls = []
+
+        async def _slow_evaluate(strategy, side, level, *, market_ctx=None):
+            evaluate_calls.append((side, level))
+            await asyncio.sleep(0.05)
+
+        s._reprice = MagicMock()
+        s._reprice.evaluate = _slow_evaluate
+
+        # Schedule both the level_task path (locked maybe_reprice) and the
+        # callback path (strategy._maybe_reprice) concurrently for the same
+        # (side, level). Only one should reach evaluate; the other must
+        # observe the lock as held and return immediately.
+        from market_maker.strategy_quoting import maybe_reprice as locked_reprice
+
+        task_a = asyncio.create_task(locked_reprice(s, OrderSide.BUY, 0))
+        task_b = asyncio.create_task(s._maybe_reprice(OrderSide.BUY, 0))
+        await asyncio.gather(task_a, task_b)
+
+        # Exactly one evaluate, not two.
+        assert len(evaluate_calls) == 1, (
+            f"Expected lock to serialise; saw {len(evaluate_calls)} evaluates: "
+            f"{evaluate_calls}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_strategy_maybe_reprice_uses_distinct_locks_per_slot(self):
+        """Different (side, level) slots have independent locks, so they
+        can reprice concurrently — the lock is per-slot, not global."""
+        s = _make_strategy()
+        in_flight = 0
+        max_in_flight = 0
+
+        async def _evaluate(strategy, side, level, *, market_ctx=None):
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            await asyncio.sleep(0.02)
+            in_flight -= 1
+
+        s._reprice = MagicMock()
+        s._reprice.evaluate = _evaluate
+
+        await asyncio.gather(
+            s._maybe_reprice(OrderSide.BUY, 0),
+            s._maybe_reprice(OrderSide.BUY, 1),
+            s._maybe_reprice(OrderSide.SELL, 0),
+            s._maybe_reprice(OrderSide.SELL, 1),
+        )
+
+        # All four ran concurrently — proves locks are per-slot.
+        assert max_in_flight == 4
+
+
 # ---------------------------------------------------------------------------
 # Tests: spread EMA
 # ---------------------------------------------------------------------------
