@@ -14,10 +14,13 @@ import time
 from decimal import Decimal
 from typing import Dict
 
-from x10.perpetual.orders import OrderSide
-from x10.perpetual.positions import PositionModel, PositionSide, PositionStatus
-from x10.perpetual.trading_client import PerpetualTradingClient
-
+from .extended_sdk import (
+    OrderSide,
+    PerpetualTradingClient,
+    PositionModel,
+    PositionSide,
+    PositionStatus,
+)
 from .risk_sizing import allowed_order_size as _allowed_order_size
 
 logger = logging.getLogger(__name__)
@@ -110,13 +113,21 @@ class RiskManager:
         if pos.market != self._market_name:
             return
 
-        if pos.status == PositionStatus.CLOSED:
+        status = getattr(pos, "status", None)
+        closed_status = getattr(PositionStatus, "CLOSED", "CLOSED")
+        if status == closed_status or str(status).upper().endswith("CLOSED"):
             self._cached_position = Decimal("0")
             self._reset_position_pnl()
             self._cached_mark_price = None
             self._cached_liquidation_price = None
         else:
-            sign = Decimal("-1") if pos.side == PositionSide.SHORT else Decimal("1")
+            side = getattr(pos, "side", None)
+            short_side = getattr(PositionSide, "SHORT", "SHORT")
+            sign = (
+                Decimal("-1")
+                if side == short_side or str(side).upper().endswith("SHORT")
+                else Decimal("1")
+            )
             self._cached_position = pos.size * sign
             self._update_position_pnl(
                 realized=getattr(pos, "realised_pnl", Decimal("0")),

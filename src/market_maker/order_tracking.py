@@ -12,7 +12,7 @@ from collections import deque
 from decimal import Decimal
 from typing import Dict, Mapping, Optional
 
-from x10.perpetual.orders import OrderSide
+from .extended_sdk import OrderSide
 
 logger = logging.getLogger(__name__)
 

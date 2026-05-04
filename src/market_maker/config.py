@@ -427,7 +427,7 @@ class MarketMakerSettings(MarketMakerSettingsBase):
 
     @property
     def endpoint_config(self) -> Any:
-        from x10.perpetual.configuration import MAINNET_CONFIG, TESTNET_CONFIG
+        from .extended_sdk import MAINNET_CONFIG, TESTNET_CONFIG
 
         if self.environment == MMEnvironment.MAINNET:
             return MAINNET_CONFIG

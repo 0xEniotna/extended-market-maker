@@ -7,7 +7,7 @@ import json
 import os
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any, Optional
 
 from dotenv import load_dotenv
 
@@ -132,8 +132,7 @@ def load_env_and_settings(
 
 def create_trading_client(settings: Any) -> Any:
     """Create a PerpetualTradingClient from settings."""
-    from x10.perpetual.accounts import StarkPerpetualAccount
-    from x10.perpetual.trading_client import PerpetualTradingClient
+    from market_maker.extended_sdk import PerpetualTradingClient, StarkPerpetualAccount
 
     account = StarkPerpetualAccount(
         vault=int(settings.vault_id),

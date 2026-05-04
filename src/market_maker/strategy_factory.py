@@ -13,11 +13,9 @@ import uuid
 from decimal import ROUND_DOWN, Decimal
 from typing import Any, Type
 
-from x10.perpetual.accounts import StarkPerpetualAccount
-from x10.perpetual.trading_client import PerpetualTradingClient
-
 from .account_stream import AccountStreamManager
 from .config import MarketMakerSettings
+from .extended_sdk import PerpetualTradingClient, StarkPerpetualAccount
 from .fee_resolver import FeeResolver
 from .metrics import MetricsCollector
 from .order_manager import OrderManager

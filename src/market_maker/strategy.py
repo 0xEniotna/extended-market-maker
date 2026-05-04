@@ -16,13 +16,11 @@ from collections import deque
 from decimal import ROUND_DOWN, Decimal
 from typing import Any, Dict, Optional, Set
 
-from x10.perpetual.orders import OrderSide
-from x10.perpetual.trading_client import PerpetualTradingClient
-
 from .account_stream import AccountStreamManager, FillEvent
 from .config import MarketMakerSettings
 from .decision_models import RepriceMarketContext, TrendState
 from .drawdown_stop import DrawdownStop
+from .extended_sdk import OrderSide, PerpetualTradingClient
 from .funding_manager import FundingManager
 from .metrics import MetricsCollector
 from .order_manager import OrderManager

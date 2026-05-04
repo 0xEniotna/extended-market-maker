@@ -396,9 +396,7 @@ async def _fetch_live_positions(root):
         sys.path.insert(0, str(root / 'src'))
         from dotenv import load_dotenv
         from market_maker.config import MarketMakerSettings
-        from x10.perpetual.accounts import StarkPerpetualAccount
-        from x10.perpetual.positions import PositionSide
-        from x10.perpetual.trading_client import PerpetualTradingClient
+        from market_maker.extended_sdk import PerpetualTradingClient, PositionSide, StarkPerpetualAccount
         from x10.utils.http import ResponseStatus
     except Exception as exc:
         return {}, f"imports_unavailable: {exc}"

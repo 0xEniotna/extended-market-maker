@@ -19,8 +19,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional
 
-from x10.perpetual.configuration import EndpointConfig
-from x10.perpetual.orderbook import OrderBook
+from .extended_sdk import EndpointConfig
+from .sdk_orderbook import OrderBook
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +127,7 @@ class OrderbookManager:
     async def _create_orderbook(self) -> None:
         """Internal: create (or recreate) the orderbook WS subscription."""
         self._orderbook = await OrderBook.create(
-            endpoint_config=self._config,
+            self._config,
             market_name=self._market_name,
             best_bid_change_callback=self._on_bid_change,
             best_ask_change_callback=self._on_ask_change,

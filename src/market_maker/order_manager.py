@@ -20,13 +20,12 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Callable, Dict, List, Optional
 
-from x10.perpetual.orders import (
+from .extended_sdk import (
     OpenOrderModel,
     OrderSide,
     OrderStatus,
+    PerpetualTradingClient,
 )
-from x10.perpetual.trading_client import PerpetualTradingClient
-
 from .fee_resolver import FeeResolver
 from .order_lifecycle import (
     OrderPlacementPermit,

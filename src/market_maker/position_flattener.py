@@ -15,7 +15,14 @@ from dataclasses import dataclass
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
 from typing import Any, Optional
 
-from x10.perpetual.orders import OrderSide, OrderType, TimeInForce
+from .extended_sdk import (
+    OrderSide,
+    OrderType,
+    RateLimitException,
+    SignedOrderFees,
+    TimeInForce,
+    place_signed_order,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -204,13 +211,8 @@ async def flatten_position(
         )
 
     try:
-        from x10.utils.http import RateLimitException
-    except Exception:
-        class RateLimitException(Exception):  # type: ignore[no-redef]
-            pass
-
-    try:
-        resp = await client.place_order(
+        resp = await place_signed_order(
+            client,
             market_name=market_name,
             amount_of_synthetic=close_size,
             price=price,
@@ -220,9 +222,11 @@ async def flatten_position(
             post_only=False,
             reduce_only=True,
             external_id=external_id,
-            max_fee_rate=fee_cfg.max_fee_rate if fee_cfg is not None else None,
-            builder_fee_rate=fee_cfg.builder_fee_rate if fee_cfg is not None else None,
-            builder_id=fee_cfg.builder_id if fee_cfg is not None else None,
+            fees=SignedOrderFees(
+                max_fee_rate=fee_cfg.max_fee_rate if fee_cfg is not None else None,
+                builder_fee_rate=fee_cfg.builder_fee_rate if fee_cfg is not None else None,
+                builder_id=fee_cfg.builder_id if fee_cfg is not None else None,
+            ),
         )
         if hasattr(resp, "status") and hasattr(resp, "error"):
             if resp.status != "OK" or resp.error is not None:

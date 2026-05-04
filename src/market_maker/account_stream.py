@@ -20,13 +20,20 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Awaitable, Callable, Deque, List, Optional
 
-from x10.perpetual.accounts import AccountStreamDataModel
-from x10.perpetual.configuration import EndpointConfig
-from x10.perpetual.orders import OpenOrderModel, OrderSide, OrderStatus, OrderStatusReason
-from x10.perpetual.positions import PositionModel
 from x10.perpetual.stream_client.stream_client import PerpetualStreamClient
-from x10.perpetual.trades import AccountTradeModel
 from x10.utils.http import WrappedStreamResponse
+
+from .extended_sdk import (
+    AccountStreamDataModel,
+    AccountTradeModel,
+    EndpointConfig,
+    OpenOrderModel,
+    OrderSide,
+    OrderStatus,
+    OrderStatusReason,
+    PositionModel,
+    stream_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +99,7 @@ class AccountStreamManager:
         api_key: str,
         market_name: str,
     ) -> None:
-        self._stream_client = PerpetualStreamClient(api_url=endpoint_config.stream_url)
+        self._stream_client = PerpetualStreamClient(api_url=stream_url(endpoint_config))
         self._api_key = api_key
         self._market_name = market_name
 

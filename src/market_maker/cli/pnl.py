@@ -8,8 +8,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, Optional
 
 from market_maker.cli.common import (
     PROJECT_ROOT,
@@ -21,7 +20,6 @@ from market_maker.cli.common import (
     load_env_and_settings,
     resolve_market_name,
     run_async,
-    to_jsonable,
 )
 
 _MS_PER_DAY = Decimal("86400000")
@@ -67,7 +65,7 @@ def _to_ms(days: Optional[float]) -> Optional[int]:
 
 
 async def _run_market_pnl(args) -> int:
-    from x10.perpetual.positions import PositionSide
+    from market_maker.extended_sdk import PositionSide
 
     settings = load_env_and_settings(args.env)
     client = create_trading_client(settings)
@@ -161,7 +159,7 @@ async def _run_market_pnl(args) -> int:
             print("Window: all available history")
         else:
             print(f"Window: last {args.days} days")
-        print(f"\nClosed positions (history):")
+        print("\nClosed positions (history):")
         print(f"  count: {stats.count} (wins={stats.wins} losses={stats.losses})")
         print(f"  realized_pnl: {fmt_decimal(stats.realized_total)} USD")
         print(f"  trade_pnl: {fmt_decimal(stats.trade_pnl_total)} USD")
@@ -170,12 +168,12 @@ async def _run_market_pnl(args) -> int:
         print(f"  close_fees: {fmt_decimal(stats.close_fees_total)} USD")
         print(f"  first_close: {fmt_ts(stats.first_ts)}")
         print(f"  last_close: {fmt_ts(stats.last_ts)}")
-        print(f"\nOpen positions (current):")
+        print("\nOpen positions (current):")
         print(f"  net_size: {fmt_decimal(net_open_size)}")
         print(f"  notional: {fmt_decimal(open_notional)} USD")
         print(f"  realized_component: {fmt_decimal(open_realized)} USD")
         print(f"  unrealized_component: {fmt_decimal(open_unrealized)} USD")
-        print(f"\nTotals:")
+        print("\nTotals:")
         print(f"  total_pnl_including_open={fmt_decimal(overall)} USD")
 
     return 0
@@ -238,7 +236,7 @@ def _annualized_returns(
 
 
 async def _run_total_pnl(args) -> int:
-    from x10.perpetual.positions import PositionSide
+    from market_maker.extended_sdk import PositionSide
 
     since_ms = _parse_since_timestamp(args.since)
     now_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
@@ -431,7 +429,8 @@ def _run_scorecard(args) -> int:
     if str(scripts_tools) not in sys.path:
         sys.path.insert(0, str(scripts_tools))
 
-    from audit_daily_scorecard import build_parser as sc_build_parser, run as sc_run
+    from audit_daily_scorecard import build_parser as sc_build_parser
+    from audit_daily_scorecard import run as sc_run
 
     # Map mmctl args to scorecard args
     sc_parser = sc_build_parser()

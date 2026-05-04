@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from market_maker.cli.common import (
     PROJECT_ROOT,
@@ -18,9 +16,7 @@ from market_maker.cli.common import (
     load_env_and_settings,
     resolve_market_name,
     run_async,
-    to_jsonable,
 )
-
 
 # ---------------------------------------------------------------------------
 # mmctl positions (lifted from scripts/tools/audit_position_risk.py)
@@ -33,7 +29,8 @@ def _run_positions(args) -> int:
     if str(scripts_tools) not in sys.path:
         sys.path.insert(0, str(scripts_tools))
 
-    from audit_position_risk import build_parser as pr_build_parser, run as pr_run
+    from audit_position_risk import build_parser as pr_build_parser
+    from audit_position_risk import run as pr_run
 
     pr_parser = pr_build_parser()
     pr_argv = []
@@ -86,7 +83,7 @@ def _extract_top_prices(orderbook: Any) -> tuple[Optional[Decimal], Optional[Dec
 
 
 def _signed_position_for_market(positions: Iterable[Any], market: str) -> Decimal:
-    from x10.perpetual.positions import PositionSide
+    from market_maker.extended_sdk import PositionSide
 
     target = market.upper()
     signed = Decimal("0")
@@ -144,7 +141,7 @@ async def _fetch_best_prices(
 
 
 async def _run_close(args) -> int:
-    from x10.perpetual.orders import OrderSide
+    from market_maker.extended_sdk import OrderSide
 
     settings = load_env_and_settings(args.env)
     market_input = args.market.strip() if args.market else settings.market_name

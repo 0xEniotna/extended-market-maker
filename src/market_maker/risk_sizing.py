@@ -11,7 +11,7 @@ import logging
 from decimal import ROUND_DOWN, Decimal
 from typing import TYPE_CHECKING, Optional
 
-from x10.perpetual.orders import OrderSide
+from .extended_sdk import OrderSide
 
 if TYPE_CHECKING:
     from .risk_manager import RiskManager

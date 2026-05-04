@@ -7,17 +7,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Optional
 
-try:
-    from x10.perpetual.fees import DEFAULT_FEES, TradingFeeModel
-except Exception:  # pragma: no cover - tests may stub x10 modules partially
-    @dataclass(frozen=True)
-    class TradingFeeModel:  # type: ignore[no-redef]
-        market: str = "UNKNOWN"
-        maker_fee_rate: Decimal = Decimal("0")
-        taker_fee_rate: Decimal = Decimal("0")
-        builder_fee_rate: Decimal = Decimal("0")
-
-    DEFAULT_FEES = TradingFeeModel()
+from .extended_sdk import DEFAULT_FEES, TradingFeeModel
 
 logger = logging.getLogger(__name__)
 

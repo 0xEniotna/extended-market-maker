@@ -13,9 +13,8 @@ import time
 from decimal import Decimal
 from typing import Any, Optional
 
-from x10.perpetual.orders import OrderSide
-
 from .decision_models import RegimeState, RepriceMarketContext, TrendState
+from .extended_sdk import OrderSide
 from .trade_journal import TradeJournal
 
 logger = logging.getLogger(__name__)

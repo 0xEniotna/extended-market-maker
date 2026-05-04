@@ -8,11 +8,9 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Type
 
-from x10.perpetual.orders import OrderSide
-from x10.perpetual.trading_client import PerpetualTradingClient
-
 from .account_stream import AccountStreamManager
 from .config import MarketMakerSettings, OffsetMode
+from .extended_sdk import OrderSide, PerpetualTradingClient
 from .fee_resolver import FeeResolver
 from .metrics import MetricsCollector
 from .monitoring_tasks import (

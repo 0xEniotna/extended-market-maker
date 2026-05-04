@@ -14,21 +14,19 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Optional
 
-from x10.perpetual.orders import OrderSide, OrderType, TimeInForce
+from .extended_sdk import (
+    OrderSide,
+    OrderType,
+    RateLimitException,
+    SignedOrderFees,
+    TimeInForce,
+    place_signed_order,
+)
 
 if TYPE_CHECKING:
     from .order_manager import OrderManager
 
 logger = logging.getLogger(__name__)
-
-try:
-    from x10.utils.http import RateLimitException as _RateLimitException
-    if not isinstance(_RateLimitException, type) or not issubclass(_RateLimitException, BaseException):
-        raise TypeError
-    RateLimitException = _RateLimitException
-except Exception:
-    class RateLimitException(Exception):  # type: ignore[no-redef]
-        pass
 
 # Default timeout for pending-cancel orders before force-removal.
 _PENDING_CANCEL_TIMEOUT_S = 10.0
@@ -112,7 +110,8 @@ async def place_order(
     mgr._record_attempt()
     mgr._begin_inflight()
     try:
-        resp = await mgr._client.place_order(
+        resp = await place_signed_order(
+            mgr._client,
             market_name=mgr._market_name,
             amount_of_synthetic=size,
             price=price,
@@ -121,9 +120,11 @@ async def place_order(
             time_in_force=TimeInForce.GTT,
             post_only=True,
             external_id=external_id,
-            max_fee_rate=fee_cfg.max_fee_rate if fee_cfg is not None else None,
-            builder_fee_rate=fee_cfg.builder_fee_rate if fee_cfg is not None else None,
-            builder_id=fee_cfg.builder_id if fee_cfg is not None else None,
+            fees=SignedOrderFees(
+                max_fee_rate=fee_cfg.max_fee_rate if fee_cfg is not None else None,
+                builder_fee_rate=fee_cfg.builder_fee_rate if fee_cfg is not None else None,
+                builder_id=fee_cfg.builder_id if fee_cfg is not None else None,
+            ),
         )
 
         if mgr._check_maintenance_response(resp=resp):
