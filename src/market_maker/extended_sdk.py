@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import json
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
@@ -14,6 +15,8 @@ from types import SimpleNamespace
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+_ORDER_STATUS_REASON_ALIASES = ("ACCOUNT_LIQUIDATION",)
 
 try:  # SDK >= 1.4.x
     from x10.config import MAINNET_CONFIG, TESTNET_CONFIG
@@ -116,6 +119,64 @@ except Exception:  # pragma: no cover - exercised by older SDK/test stubs
     else:
         class RateLimitException(Exception):  # type: ignore[no-redef]
             pass
+
+
+def _patch_order_status_reason_aliases() -> None:
+    """Accept venue reason codes missing from the SDK enum.
+
+    Extended can emit newer ``statusReason`` values before the Python SDK enum
+    is updated. Mapping those to ``UNKNOWN`` keeps order/account stream parsing
+    alive while preserving the raw response in logs when available.
+    """
+    value_map = getattr(OrderStatusReason, "_value2member_map_", None)
+    unknown = getattr(OrderStatusReason, "UNKNOWN", None)
+    if not isinstance(value_map, dict) or unknown is None:
+        return
+    for reason in _ORDER_STATUS_REASON_ALIASES:
+        value_map.setdefault(reason, unknown)
+
+
+def _replace_order_status_reason_aliases(payload: Any) -> Any:
+    if isinstance(payload, dict):
+        return {
+            key: (
+                "UNKNOWN"
+                if key in {"statusReason", "status_reason"}
+                and value in _ORDER_STATUS_REASON_ALIASES
+                else _replace_order_status_reason_aliases(value)
+            )
+            for key, value in payload.items()
+        }
+    if isinstance(payload, list):
+        return [_replace_order_status_reason_aliases(item) for item in payload]
+    return payload
+
+
+def _patch_response_parser_status_reason_aliases() -> None:
+    try:
+        http_mod = importlib.import_module("x10.utils.http")
+    except Exception:
+        return
+
+    original = getattr(http_mod, "parse_response_to_model", None)
+    if original is None or getattr(original, "_mm_status_reason_alias_patch", False):
+        return
+
+    def parse_response_to_model(response_text: str, model_class: Any) -> Any:
+        if any(reason in response_text for reason in _ORDER_STATUS_REASON_ALIASES):
+            try:
+                payload = json.loads(response_text)
+                response_text = json.dumps(_replace_order_status_reason_aliases(payload))
+            except Exception:
+                pass
+        return original(response_text, model_class)
+
+    parse_response_to_model._mm_status_reason_alias_patch = True  # type: ignore[attr-defined]
+    http_mod.parse_response_to_model = parse_response_to_model
+
+
+_patch_order_status_reason_aliases()
+_patch_response_parser_status_reason_aliases()
 
 
 @dataclass(frozen=True)
