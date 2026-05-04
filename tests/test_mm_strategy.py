@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
+from collections import deque
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Optional
@@ -50,8 +51,9 @@ _orders_mod.TimeInForce = SimpleNamespace(GTT="GTT")
 
 # Now safe to import
 from market_maker.config import MarketMakerSettings  # noqa: E402
-from market_maker.decision_models import TrendState  # noqa: E402
+from market_maker.decision_models import RegimeState, TrendState  # noqa: E402
 from market_maker.orderbook_manager import OrderbookManager, PriceLevel  # noqa: E402
+from market_maker.strategy_quoting import build_reprice_market_context  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -65,6 +67,7 @@ class FakeOrderbook:
         self._ask = PriceLevel(price=ask, size=Decimal("100"))
         self.best_bid_condition = asyncio.Condition()
         self.best_ask_condition = asyncio.Condition()
+        self.bbo_condition = asyncio.Condition()
         self._stale = False
         self._micro_vol_bps: Optional[Decimal] = None
         self._micro_drift_bps: Optional[Decimal] = None
@@ -197,6 +200,7 @@ def _make_strategy(
         max_position_size=max_position_size,
         max_position_notional_usd=max_position_notional_usd,
         reprice_tolerance_percent=Decimal("0.5"),
+        journal_reprice_decisions=True,
     )
 
     ob = FakeOrderbook(bid, ask)
@@ -216,6 +220,7 @@ def _make_strategy(
     orders.consecutive_failures = 0
     orders.avg_placement_latency_ms.return_value = 0.0
     orders.latency_sample_count.return_value = 0
+    orders.prepare_place_order = AsyncMock(return_value=SimpleNamespace())
 
     strategy = MarketMakerStrategy(
         settings=settings,
@@ -483,6 +488,30 @@ class TestStaleCancel:
         await s._maybe_reprice(OrderSide.BUY, 0)
         s._orders.cancel_order.assert_awaited_once_with("ext-1")
 
+    @pytest.mark.asyncio
+    async def test_stale_book_cancel_bypasses_reprice_throttle(self):
+        s = _make_strategy()
+        key = (str(OrderSide.BUY), 0)
+        s._level_ext_ids[key] = "ext-1"
+        s._level_order_created_at[key] = time.monotonic()
+        s._level_last_reprice_at[key] = time.monotonic()
+        s._ob._stale = True
+        s._settings.cancel_on_stale_book = True
+        s._settings.stale_cancel_grace_s = 0
+        s._orders.cancel_order = AsyncMock(return_value=True)
+        s._orders.get_active_orders.return_value = {
+            "ext-1": SimpleNamespace(
+                side=OrderSide.BUY,
+                price=Decimal("1.60"),
+                size=Decimal("10"),
+                level=0,
+            )
+        }
+
+        await s._maybe_reprice(OrderSide.BUY, 0)
+
+        s._orders.cancel_order.assert_awaited_once_with("ext-1")
+
 
 class TestCancelSafety:
     @pytest.mark.asyncio
@@ -507,6 +536,40 @@ class TestCancelSafety:
         s._orders.cancel_order.assert_awaited_once_with("ext-1")
         s._orders.place_order.assert_not_awaited()
         assert s._level_ext_ids[key] == "ext-1"
+
+    @pytest.mark.asyncio
+    async def test_reprice_cancel_terminal_event_schedules_immediate_retry(self):
+        s = _make_strategy()
+        key = (str(OrderSide.BUY), 0)
+        s._level_ext_ids[key] = "ext-1"
+        s._pending_cancel_reasons["ext-1"] = "reprice"
+        s._maybe_reprice = AsyncMock()
+        s._orders.find_order_by_external_id.return_value = SimpleNamespace(
+            exchange_order_id="1"
+        )
+
+        s._on_level_freed(str(OrderSide.BUY), 0, "ext-1", status="CANCELLED")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        s._maybe_reprice.assert_awaited_once_with("BUY", 0)
+
+
+class TestMarketContextCache:
+    def test_build_reprice_market_context_reuses_short_ttl_cache(self):
+        s = _make_strategy(market_profile="crypto")
+        s._volatility = MagicMock()
+        s._volatility.evaluate.return_value = RegimeState(regime="NORMAL")
+        s._volatility.cadence.return_value = (0.5, 15.0)
+        s._trend_signal = MagicMock()
+        s._trend_signal.evaluate.return_value = TrendState()
+
+        ctx1 = build_reprice_market_context(s)
+        ctx2 = build_reprice_market_context(s)
+
+        assert ctx1 is ctx2
+        s._volatility.evaluate.assert_called_once()
+        s._trend_signal.evaluate.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -560,6 +623,39 @@ class TestSpreadEma:
 
         assert ob._last_update_ts > 0.0
         assert ob._was_stale is False
+
+    def test_mid_history_sampling_throttles_dense_bbo_updates(self):
+        ob = OrderbookManager.__new__(OrderbookManager)
+        ob._last_bid = PriceLevel(price=Decimal("100"), size=Decimal("10"))
+        ob._last_ask = PriceLevel(price=Decimal("101"), size=Decimal("10"))
+        ob._mid_history = deque()
+        ob._mid_history_max_age_s = 120.0
+        ob._mid_history_sample_interval_s = 10.0
+        ob._last_mid_record_ts = 0.0
+
+        ob._record_mid()
+        ob._last_bid = PriceLevel(price=Decimal("100.1"), size=Decimal("10"))
+        ob._record_mid()
+
+        assert len(ob._mid_history) == 1
+
+    @pytest.mark.asyncio
+    async def test_bbo_condition_notifies_on_either_side_change(self):
+        ob = OrderbookManager(SimpleNamespace(), "TEST-USD")
+
+        async def wait_for_bbo_change():
+            async with ob.bbo_condition:
+                await asyncio.wait_for(ob.bbo_condition.wait(), timeout=1.0)
+
+        bid_waiter = asyncio.create_task(wait_for_bbo_change())
+        await asyncio.sleep(0)
+        await ob._on_bid_change(SimpleNamespace(price="100", size="1"))
+        await bid_waiter
+
+        ask_waiter = asyncio.create_task(wait_for_bbo_change())
+        await asyncio.sleep(0)
+        await ob._on_ask_change(SimpleNamespace(price="101", size="1"))
+        await ask_waiter
 
 
 class TestAdaptivePof:

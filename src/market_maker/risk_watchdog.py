@@ -215,15 +215,19 @@ class RiskWatchdog:
     # ------------------------------------------------------------------
 
     async def circuit_breaker_task(self, shutdown_event: asyncio.Event) -> None:
-        """Monitor consecutive failures, sweep pending cancels, and detect zombies."""
-        max_failures = self._settings.circuit_breaker_max_failures  # type: ignore[attr-defined]
-        cooldown = self._settings.circuit_breaker_cooldown_s  # type: ignore[attr-defined]
-        failure_window_s = self._settings.failure_window_s  # type: ignore[attr-defined]
-        failure_rate_trip = float(self._settings.failure_rate_trip)  # type: ignore[attr-defined]
-        min_attempts = self._settings.min_attempts_for_breaker  # type: ignore[attr-defined]
+        """Monitor consecutive failures, sweep pending cancels, and detect zombies.
 
+        Settings are re-read inside the loop so SIGHUP-driven config changes
+        take effect without restarting the task.
+        """
         while not shutdown_event.is_set():
             try:
+                max_failures = self._settings.circuit_breaker_max_failures  # type: ignore[attr-defined]
+                cooldown = self._settings.circuit_breaker_cooldown_s  # type: ignore[attr-defined]
+                failure_window_s = self._settings.failure_window_s  # type: ignore[attr-defined]
+                failure_rate_trip = float(self._settings.failure_rate_trip)  # type: ignore[attr-defined]
+                min_attempts = self._settings.min_attempts_for_breaker  # type: ignore[attr-defined]
+
                 self._orders.sweep_pending_cancels()  # type: ignore[attr-defined]
 
                 zombie_threshold_s = self._settings.max_order_age_s * 2  # type: ignore[attr-defined]

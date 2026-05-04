@@ -21,7 +21,7 @@ from x10.perpetual.trading_client import PerpetualTradingClient
 
 from .account_stream import AccountStreamManager, FillEvent
 from .config import MarketMakerSettings
-from .decision_models import TrendState
+from .decision_models import RepriceMarketContext, TrendState
 from .drawdown_stop import DrawdownStop
 from .funding_manager import FundingManager
 from .metrics import MetricsCollector
@@ -97,6 +97,9 @@ class MarketMakerStrategy:
         self._level_stale_since: Dict[tuple[str, int], Optional[float]] = {}
         self._level_cancel_pending_ext_id: Dict[tuple[str, int], Optional[str]] = {}
         self._pending_cancel_reasons: Dict[str, str] = {}
+        self._pending_replace_tasks: Dict[tuple[str, int], asyncio.Task] = {}
+        self._level_reprice_locks: Dict[tuple[str, int], asyncio.Lock] = {}
+        self._market_ctx_cache: Optional[tuple[float, RepriceMarketContext]] = None
 
         # Fill deduplication
         self._seen_trade_ids: deque = deque()

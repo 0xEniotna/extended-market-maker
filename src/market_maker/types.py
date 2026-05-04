@@ -109,8 +109,9 @@ class _OrderManagerLike(Protocol):
     def reserved_exposure(
         self, *, side: object, exclude_external_id: Optional[str],
     ) -> tuple[Decimal, Decimal]: ...
+    async def prepare_place_order(self) -> Optional[Any]: ...
     async def place_order(
-        self, *, side: object, price: Decimal, size: Decimal, level: int,
+        self, *, side: object, price: Decimal, size: Decimal, level: int, permit: Any = ...,
     ) -> Optional[str]: ...
 
 

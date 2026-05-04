@@ -1,0 +1,57 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Market Maker — ETH",
+      "runtimeExecutable": "mmctl",
+      "runtimeArgs": ["start", "eth"],
+      "port": null
+    },
+    {
+      "name": "Market Maker — TRUMP",
+      "runtimeExecutable": "mmctl",
+      "runtimeArgs": ["start", "trump"],
+      "port": null
+    },
+    {
+      "name": "Market Maker — TAO",
+      "runtimeExecutable": "mmctl",
+      "runtimeArgs": ["start", "tao"],
+      "port": null
+    },
+    {
+      "name": "Market Maker — XBR",
+      "runtimeExecutable": "mmctl",
+      "runtimeArgs": ["start", "xbr"],
+      "port": null
+    },
+    {
+      "name": "Market Maker — XCU",
+      "runtimeExecutable": "mmctl",
+      "runtimeArgs": ["start", "xcu"],
+      "port": null
+    },
+    {
+      "name": "Market Maker — XNG",
+      "runtimeExecutable": "mmctl",
+      "runtimeArgs": ["start", "xng"],
+      "port": null
+    },
+    {
+      "name": "Advisor Loop",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "scripts/mm_advisor_loop.py",
+        "--repo", ".",
+        "--iterations", "1",
+        "--sleep-s", "0",
+        "--journal-dir", "data/mm_journal",
+        "--advisor-dir", "data/mm_audit/advisor",
+        "--baselines-dir", "data/mm_audit/autotune_baselines",
+        "--config-changelog", "data/mm_audit/config_changelog.jsonl",
+        "--apply-receipts", "data/mm_audit/advisor/apply_receipts.jsonl"
+      ],
+      "port": null
+    }
+  ]
+}

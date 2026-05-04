@@ -182,16 +182,6 @@ class RepricePipeline:
                 funding_bias_bps=market_ctx.funding_bias_bps,
             )
 
-        if market_ctx.min_reprice_interval_s > 0:
-            last_reprice = strategy._level_last_reprice_at.get(level_ctx.key, 0.0)
-            elapsed = now - last_reprice
-            if elapsed < market_ctx.min_reprice_interval_s:
-                logger.debug(
-                    "Reprice throttled %s L%d: %.1fs since last reprice (min=%.1fs)",
-                    side, level, elapsed, market_ctx.min_reprice_interval_s,
-                )
-                return False
-
         if strategy._ob.is_stale():
             strategy._record_reprice_decision(side=side, level=level, reason="skip_stale")
             if strategy._settings.cancel_on_stale_book and level_ctx.prev_ext_id is not None:
@@ -211,6 +201,43 @@ class RepricePipeline:
 
         strategy._level_stale_since[level_ctx.key] = None
         return True
+
+    def _cadence_allows_replace(
+        self,
+        strategy: StrategyContext,
+        side,
+        level: int,
+        *,
+        now: float,
+        level_ctx: LevelContext,
+        market_ctx: RepriceMarketContext,
+        quote_inputs: QuoteInputs,
+        target_price: Decimal,
+    ) -> bool:
+        if market_ctx.min_reprice_interval_s <= 0:
+            return True
+        last_reprice = strategy._level_last_reprice_at.get(level_ctx.key, 0.0)
+        elapsed = now - last_reprice
+        if elapsed >= market_ctx.min_reprice_interval_s:
+            return True
+        logger.debug(
+            "Reprice throttled %s L%d: %.1fs since last reprice (min=%.1fs)",
+            side, level, elapsed, market_ctx.min_reprice_interval_s,
+        )
+        strategy._record_reprice_decision(
+            side=side,
+            level=level,
+            reason="hold_reprice_throttle",
+            current_best=quote_inputs.current_best,
+            prev_price=level_ctx.prev_order.price if level_ctx.prev_order else None,
+            target_price=target_price,
+            **self._decision_fields(
+                market_ctx=market_ctx,
+                spread_bps=quote_inputs.spread_bps,
+                extra_offset_bps=quote_inputs.extra_offset_bps,
+            ),
+        )
+        return False
 
     def _decision_fields(
         self,
@@ -302,7 +329,7 @@ class RepricePipeline:
 
         current_best = bid.price if str(side).endswith("BUY") or str(side) == "BUY" else ask.price
 
-        # Fold in POF-spread correlation boost if available.
+        # Fold in dynamic widening from local execution conditions.
         pof_boost = Decimal("0")
         post_only = getattr(strategy, "_post_only", None)
         if post_only is not None:
@@ -310,12 +337,23 @@ class RepricePipeline:
         rate_limit_boost = getattr(strategy._orders, "rate_limit_extra_offset_bps", Decimal("0"))
         if not isinstance(rate_limit_boost, Decimal):
             rate_limit_boost = Decimal("0")
+        latency_boost = Decimal("0")
+        latency_monitor = getattr(strategy, "_latency_monitor", None)
+        if latency_monitor is not None:
+            raw_latency_boost = getattr(latency_monitor, "extra_offset_bps", Decimal("0"))
+            if isinstance(raw_latency_boost, Decimal):
+                latency_boost = raw_latency_boost
 
         return QuoteInputs(
             bid=bid,
             ask=ask,
             spread_bps=spread_bps,
-            extra_offset_bps=guard.extra_offset_bps + pof_boost + rate_limit_boost,
+            extra_offset_bps=(
+                guard.extra_offset_bps
+                + pof_boost
+                + rate_limit_boost
+                + latency_boost
+            ),
             current_best=current_best,
         )
 
@@ -370,6 +408,17 @@ class RepricePipeline:
             trend=market_ctx.trend,
             funding_bias_bps=market_ctx.funding_bias_bps,
         )
+        if should_reprice and not self._cadence_allows_replace(
+            strategy,
+            side,
+            level,
+            now=time.monotonic(),
+            level_ctx=level_ctx,
+            market_ctx=market_ctx,
+            quote_inputs=quote_inputs,
+            target_price=target_price,
+        ):
+            return False
         strategy._record_reprice_decision(
             side=side,
             level=level,

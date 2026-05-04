@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -31,19 +32,19 @@ except Exception:
 
 # Default timeout for pending-cancel orders before force-removal.
 _PENDING_CANCEL_TIMEOUT_S = 10.0
+_ORDER_REQUEST_TOKEN_TIMEOUT_S = 2.0
 
 
-async def place_order(
-    mgr: OrderManager,
-    side: OrderSide,
-    price: Decimal,
-    size: Decimal,
-    level: int,
-) -> Optional[str]:
-    """Place a post-only limit order via the manager's trading client.
+@dataclass(frozen=True)
+class OrderPlacementPermit:
+    """Pre-acquired resources needed to submit an order immediately."""
 
-    Returns the external_id on success, None on failure.
-    """
+    fee_cfg: Any = None
+    acquired_at: float = 0.0
+
+
+async def prepare_place_order(mgr: OrderManager) -> Optional[OrderPlacementPermit]:
+    """Resolve order fees and acquire request capacity before final price checks."""
     if mgr.in_maintenance:
         logger.debug(
             "Skipping order placement during maintenance (%.0fs remaining)",
@@ -69,12 +70,33 @@ async def place_order(
             )
             return None
 
-    if not await mgr._rate_state.acquire_rate_token(timeout=2.0):
+    if not await mgr._rate_state.acquire_rate_token(timeout=_ORDER_REQUEST_TOKEN_TIMEOUT_S):
         logger.warning(
             "Rate limiter timeout: order placement throttled for market=%s",
             mgr._market_name,
         )
         return None
+
+    return OrderPlacementPermit(fee_cfg=fee_cfg, acquired_at=time.monotonic())
+
+
+async def place_order(
+    mgr: OrderManager,
+    side: OrderSide,
+    price: Decimal,
+    size: Decimal,
+    level: int,
+    *,
+    permit: Optional[OrderPlacementPermit] = None,
+) -> Optional[str]:
+    """Place a post-only limit order via the manager's trading client.
+
+    Returns the external_id on success, None on failure.
+    """
+    permit = permit if permit is not None else await prepare_place_order(mgr)
+    if permit is None:
+        return None
+    fee_cfg = permit.fee_cfg
 
     external_id = mgr._generate_external_id()
 
@@ -187,9 +209,17 @@ async def cancel_order(mgr: Any, external_id: str) -> bool:
 
     mgr._begin_inflight()
     try:
+        if not await mgr._rate_state.acquire_rate_token(timeout=_ORDER_REQUEST_TOKEN_TIMEOUT_S):
+            logger.warning(
+                "Rate limiter timeout: cancel throttled for ext_id=%s exchange_id=%s",
+                external_id, info.exchange_order_id,
+            )
+            return False
         await mgr._client.orders.cancel_order_by_external_id(
             order_external_id=external_id,
         )
+        if external_id in mgr._active_orders:
+            mgr._pending_cancel.setdefault(external_id, time.monotonic())
         logger.info(
             "Order cancel requested: ext_id=%s exchange_id=%s",
             external_id, info.exchange_order_id,
@@ -216,6 +246,12 @@ async def cancel_all_orders(mgr: Any) -> None:
     """Cancel every order for this market using mass-cancel."""
     mgr._begin_inflight()
     try:
+        if not await mgr._rate_state.acquire_rate_token(timeout=_ORDER_REQUEST_TOKEN_TIMEOUT_S):
+            logger.warning(
+                "Rate limiter timeout: mass cancel throttled for market=%s",
+                mgr._market_name,
+            )
+            return
         now = time.monotonic()
         for ext_id in list(mgr._active_orders):
             mgr._pending_cancel[ext_id] = now

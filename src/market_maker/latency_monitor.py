@@ -72,6 +72,7 @@ class LatencyMonitor:
 
         self._samples: deque[tuple[float, float]] = deque(maxlen=_MAX_SAMPLES)
 
+        self._extra_offset_bps = Decimal("0")
         self._degraded = False
         self._halt = False
 
@@ -92,6 +93,7 @@ class LatencyMonitor:
         values = self._prune(now)
 
         if not values:
+            self._extra_offset_bps = Decimal("0")
             self._degraded = False
             self._halt = False
             return LatencySLASnapshot()
@@ -110,8 +112,10 @@ class LatencyMonitor:
         if p95 >= self._critical_ms and len(values) >= _MIN_SAMPLES_FOR_HALT:
             halt = True
             degraded = True
+            extra_offset = self._max_extra_offset_bps
         elif p95 >= self._critical_ms:
             degraded = True
+            extra_offset = self._max_extra_offset_bps
         elif p95 >= self._warn_ms:
             degraded = True
             excess_ms = Decimal(str(p95 - self._warn_ms))
@@ -122,6 +126,7 @@ class LatencyMonitor:
 
         was_halt = self._halt
         was_degraded = self._degraded
+        self._extra_offset_bps = extra_offset
         self._halt = halt
         self._degraded = degraded
 
@@ -158,3 +163,7 @@ class LatencyMonitor:
     @property
     def is_degraded(self) -> bool:
         return self._degraded
+
+    @property
+    def extra_offset_bps(self) -> Decimal:
+        return self._extra_offset_bps

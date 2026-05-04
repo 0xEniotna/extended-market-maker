@@ -29,6 +29,9 @@ from x10.perpetual.trading_client import PerpetualTradingClient
 
 from .fee_resolver import FeeResolver
 from .order_lifecycle import (
+    OrderPlacementPermit,
+)
+from .order_lifecycle import (
     cancel_all_orders as _cancel_all,
 )
 from .order_lifecycle import (
@@ -36,6 +39,9 @@ from .order_lifecycle import (
 )
 from .order_lifecycle import (
     place_order as _place,
+)
+from .order_lifecycle import (
+    prepare_place_order as _prepare_place,
 )
 from .order_lifecycle import (
     sweep_pending_cancels as _sweep,
@@ -284,8 +290,19 @@ class OrderManager:
 
     # Order lifecycle (delegated to order_lifecycle module)
 
-    async def place_order(self, side, price, size, level) -> Optional[str]:
-        return await _place(self, side, price, size, level)
+    async def prepare_place_order(self) -> Optional[OrderPlacementPermit]:
+        return await _prepare_place(self)
+
+    async def place_order(
+        self,
+        side,
+        price,
+        size,
+        level,
+        *,
+        permit: Optional[OrderPlacementPermit] = None,
+    ) -> Optional[str]:
+        return await _place(self, side, price, size, level, permit=permit)
 
     async def cancel_order(self, external_id: str) -> bool:
         return await _cancel_one(self, external_id)

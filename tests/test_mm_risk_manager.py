@@ -90,15 +90,27 @@ def test_allowed_order_size_clips_by_position_notional():
     assert allowed == Decimal("5")
 
 
-def test_allowed_order_size_zero_when_position_notional_limit_already_reached():
+def test_allowed_order_size_zero_when_opening_at_position_notional_cap():
+    """When position notional is at the cap, *opening* orders are blocked but
+    *reducing* orders go through (F-RS1 fix)."""
     rm = _make_rm(max_position_notional_usd=Decimal("1000"))
-    rm._cached_position = Decimal("10")
-    allowed = rm.allowed_order_size(
+    rm._cached_position = Decimal("10")  # long, notional 1000 at price 100
+
+    # BUY when long → opening direction, blocked by notional cap.
+    opening_allowed = rm.allowed_order_size(
+        side=OrderSide.BUY,
+        requested_size=Decimal("3"),
+        reference_price=Decimal("100"),
+    )
+    assert opening_allowed == Decimal("0")
+
+    # SELL when long → reducing direction, exempt from notional cap.
+    reducing_allowed = rm.allowed_order_size(
         side=OrderSide.SELL,
         requested_size=Decimal("3"),
         reference_price=Decimal("100"),
     )
-    assert allowed == Decimal("0")
+    assert reducing_allowed == Decimal("3")
 
 
 def test_allowed_order_size_accounts_for_reserved_same_side_qty():

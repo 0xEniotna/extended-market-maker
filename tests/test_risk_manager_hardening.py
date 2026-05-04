@@ -652,6 +652,42 @@ class TestBackwardCompatibility:
         )
         assert allowed == Decimal("5")
 
+    def test_position_notional_cap_exempts_reducing_orders(self):
+        """A BUY that reduces a short position must not be clipped by the
+        position notional cap, even when current notional == cap."""
+        rm = _make_rm(
+            max_position_size=Decimal("200"),
+            max_position_notional_usd=Decimal("1000"),
+        )
+        # Short -100 at price 10 → notional 1000 (exactly at cap).
+        rm._cached_position = Decimal("-100")
+        # BUY 50 reduces position to -50. Should be fully allowed.
+        allowed = rm.allowed_order_size(
+            side=OrderSide.BUY,
+            requested_size=Decimal("50"),
+            reference_price=Decimal("10"),
+        )
+        assert allowed == Decimal("50")
+
+    def test_position_notional_cap_still_clips_opening_portion(self):
+        """When an order crosses zero (reducing + opening), only the opening
+        portion should be subject to the position notional cap."""
+        rm = _make_rm(
+            max_position_size=Decimal("1000"),
+            max_position_notional_usd=Decimal("1000"),
+        )
+        # Short -50 at price 10 → notional 500. Cap room = 500 → 50 units.
+        rm._cached_position = Decimal("-50")
+        # BUY 200: closes -50 short, would open +150 long. Opening is clipped
+        # to the per-side max position size (1000) and then by the notional
+        # cap = 50 → total allowed = 50 (reducing) + 50 (opening) = 100.
+        allowed = rm.allowed_order_size(
+            side=OrderSide.BUY,
+            requested_size=Decimal("200"),
+            reference_price=Decimal("10"),
+        )
+        assert allowed == Decimal("100")
+
     def test_balance_aware_sizing_unchanged(self):
         rm = _make_rm(
             balance_aware_sizing_enabled=True,

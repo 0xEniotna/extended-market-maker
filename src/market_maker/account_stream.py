@@ -111,6 +111,7 @@ class AccountStreamManager:
         self._fail_safe_handler: Optional[FailSafeCallback] = None
 
         self._connected: bool = False
+        self._connected_at_ts: float = 0.0
         self._sequence_healthy: bool = True
         self._last_seq: Optional[int] = None
         self._rolling_fill_window_1m: Deque[tuple[float, Decimal, bool]] = deque()
@@ -224,6 +225,8 @@ class AccountStreamManager:
                     pass
         self._task = None
         self._health_task = None
+        self._connected = False
+        self._connected_at_ts = 0.0
         logger.info("Account stream manager stopped")
 
     # ------------------------------------------------------------------
@@ -235,7 +238,9 @@ class AccountStreamManager:
 
         Reconnects on drop with exponential backoff and jitter, mirroring
         the pattern in ``OrderbookManager._reconnect_watchdog``.  Backoff
-        resets after a successful connection delivers at least one event.
+        resets after at least one event has been processed *without* a
+        sequence-gap raise, so a tight gap loop cannot loop fast and
+        flood the venue with mass-cancel calls via _trigger_fail_safe.
         """
         consecutive_failures = 0
         while True:
@@ -246,15 +251,19 @@ class AccountStreamManager:
                 ) as stream:
                     logger.info("Account stream connected")
                     self._connected = True
+                    self._connected_at_ts = time.monotonic()
                     self._last_seq = None
-                    consecutive_failures = 0  # connected successfully
                     async for event in stream:
-                        got_event = True
                         await self._handle_event(event)
+                        # Reset backoff only after an event survives the
+                        # sequence check — surviving means no gap was raised.
+                        got_event = True
+                        consecutive_failures = 0
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 self._connected = False
+                self._connected_at_ts = 0.0
                 self._sequence_healthy = False
                 await self._trigger_fail_safe("account_stream_error")
                 consecutive_failures += 1
@@ -285,6 +294,7 @@ class AccountStreamManager:
                 )
                 delay = backoff + random.uniform(0.0, _STREAM_JITTER_MAX_S)
             self._connected = False
+            self._connected_at_ts = 0.0
             self._sequence_healthy = False
             await self._trigger_fail_safe("account_stream_disconnect")
             logger.warning(
@@ -311,12 +321,8 @@ class AccountStreamManager:
         while True:
             try:
                 await asyncio.sleep(5.0)
+                now = time.monotonic()
                 last_event_ts = self.metrics.last_event_ts
-                if last_event_ts == 0.0:
-                    # No event received yet (initial startup).
-                    continue
-
-                elapsed = time.monotonic() - last_event_ts
                 has_active_orders = False
                 if self._order_mgr is not None:
                     count_fn = getattr(self._order_mgr, "active_order_count", None)
@@ -328,9 +334,18 @@ class AccountStreamManager:
                     cancelled = False
                     continue
 
+                silence_reason = "account_stream_silent"
+                if last_event_ts == 0.0:
+                    if not self._connected or self._connected_at_ts == 0.0:
+                        continue
+                    elapsed = now - self._connected_at_ts
+                    silence_reason = "account_stream_no_initial_event"
+                else:
+                    elapsed = now - last_event_ts
+
                 if elapsed >= _CANCEL_THRESHOLD_S and not cancelled:
                     logger.critical(
-                        "Account stream silent for %.0fs with %s active orders — "
+                        "Account stream unconfirmed for %.0fs with %s active orders — "
                         "cancelling all orders as safety measure",
                         elapsed,
                         "unknown" if not has_active_orders else "active",
@@ -345,14 +360,14 @@ class AccountStreamManager:
                                 event_type="stream_health_cancel",
                                 details={
                                     "elapsed_s": elapsed,
-                                    "reason": "account_stream_silent",
+                                    "reason": silence_reason,
                                 },
                             )
                     cancelled = True
                     warned = True
                 elif elapsed >= _WARNING_THRESHOLD_S and not warned:
                     logger.warning(
-                        "Account stream silent for %.0fs with active orders — "
+                        "Account stream unconfirmed for %.0fs with active orders — "
                         "order state may be stale",
                         elapsed,
                     )

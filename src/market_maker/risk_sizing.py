@@ -101,24 +101,13 @@ def allowed_order_size(
         clipped = min(clipped, max(Decimal("0"), qty_headroom))
 
     if reference_price > 0:
-        # Per-order notional cap.
+        # Per-order notional cap (applies to total order size; reducing or not).
         max_order_notional = getattr(risk, "_max_order_notional_usd", Decimal("0"))
         if max_order_notional > 0:
             per_order_max_size = max_order_notional / reference_price
             clipped = min(clipped, max(Decimal("0"), per_order_max_size))
 
-        # Absolute position notional cap.
-        max_pos_notional = getattr(risk, "_max_position_notional_usd", Decimal("0"))
-        if max_pos_notional > 0:
-            current_notional = abs(current) * reference_price
-            reserved_notional = reserved_same_side_qty * reference_price
-            remaining_notional = max_pos_notional - current_notional - reserved_notional
-            if remaining_notional <= 0:
-                clipped = Decimal("0")
-            else:
-                clipped = min(clipped, max(Decimal("0"), remaining_notional / reference_price))
-
-        # Gross exposure limit.
+        # Gross exposure limit (position + open orders).
         gross_limit = getattr(risk, "_gross_exposure_limit_usd", Decimal("0"))
         if gross_limit > 0:
             position_notional = abs(current) * reference_price
@@ -134,6 +123,21 @@ def allowed_order_size(
         reducing_qty, opening_qty = RiskManager._split_reducing_and_opening_qty(
             side=side, current_position=current, size=clipped,
         )
+
+        # Absolute position notional cap — only restricts orders that would
+        # *increase* the position. Reducing orders are exempt because they
+        # cannot push position notional past its current value.
+        max_pos_notional = getattr(risk, "_max_position_notional_usd", Decimal("0"))
+        if max_pos_notional > 0 and opening_qty > 0:
+            current_notional = abs(current) * reference_price
+            reserved_notional = reserved_same_side_qty * reference_price
+            remaining_notional = max_pos_notional - current_notional - reserved_notional
+            if remaining_notional <= 0:
+                opening_qty = Decimal("0")
+            else:
+                max_opening_from_notional = remaining_notional / reference_price
+                opening_qty = min(opening_qty, max(Decimal("0"), max_opening_from_notional))
+            clipped = reducing_qty + opening_qty
 
         # Balance-aware sizing (with staleness guard).
         balance_available = risk._cached_available_for_trade

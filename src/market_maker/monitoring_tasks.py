@@ -146,6 +146,7 @@ async def pnl_attribution_task(s: Any) -> None:
                     details={
                         "spread_capture_usd": str(snap.spread_capture_usd),
                         "inventory_pnl_usd": str(snap.inventory_pnl_usd),
+                        "realized_pnl_usd": str(snap.realized_pnl_usd),
                         "fee_pnl_usd": str(snap.fee_pnl_usd),
                         "funding_pnl_usd": str(snap.funding_pnl_usd),
                         "total_usd": str(snap.total_usd),
@@ -233,17 +234,24 @@ async def config_rollback_task(s: Any) -> None:
                 )
                 if decision.should_rollback:
                     good_config = s._config_rollback.last_known_good_config
+                    # The watchdog detects degradation but does not currently
+                    # apply the rollback automatically — operator must revert
+                    # the config (e.g. via SIGHUP after editing .env). The
+                    # event type and message reflect that to avoid implying
+                    # an action that did not happen.
                     s._journal.record_exchange_event(
-                        event_type="config_rollback",
+                        event_type="config_rollback_detected",
                         details={
                             "reason": decision.reason,
                             "degraded_metrics": {
                                 k: str(v) for k, v in decision.degraded_metrics.items()
                             },
+                            "good_config_available": good_config is not None,
                         },
                     )
                     logger.warning(
-                        "Config rollback triggered: %s (good config available: %s)",
+                        "Config degradation DETECTED (manual rollback required): %s "
+                        "(good config available: %s)",
                         decision.reason,
                         good_config is not None,
                     )

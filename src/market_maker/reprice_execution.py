@@ -137,6 +137,10 @@ async def execute_replace_if_needed(
             )
             return
 
+    permit = await strategy._orders.prepare_place_order()
+    if permit is None:
+        return
+
     if strategy._ob.is_stale():
         return
     fresh_bid = strategy._ob.best_bid()
@@ -159,6 +163,7 @@ async def execute_replace_if_needed(
         price=safe_target_price,
         size=order_plan.level_size,
         level=level,
+        permit=permit,
     )
     if ext_id is None:
         return

@@ -33,6 +33,12 @@ _FATAL_EXCEPTION_PATTERNS = frozenset({
     "account suspended",
     "account disabled",
 })
+_BBO_WAKE_TIMEOUT_S = 1.0
+_MARKET_CONTEXT_CACHE_TTL_S = 0.05
+# How long to sleep when waiting for an in-flight cancel to acknowledge
+# before re-checking. Shorter is better for the cancel-replace gap window;
+# 25 ms tracks typical WS round-trip latency without busy-spinning.
+_CANCEL_PENDING_SLEEP_S = 0.025
 
 
 def normalise_side(side_value: str) -> str:
@@ -59,11 +65,13 @@ async def level_task(s: Any, side: OrderSide, level: int) -> None:
     key = (str(side), level)
     s._clear_level_slot(key)
 
-    condition = (
-        s._ob.best_bid_condition
-        if side == OrderSide.BUY
-        else s._ob.best_ask_condition
-    )
+    condition = getattr(s._ob, "bbo_condition", None)
+    if condition is None:
+        condition = (
+            s._ob.best_bid_condition
+            if side == OrderSide.BUY
+            else s._ob.best_ask_condition
+        )
 
     _cancel_wait_logged_at: dict[tuple[str, int], float] = {}
 
@@ -85,12 +93,12 @@ async def level_task(s: Any, side: OrderSide, level: int) -> None:
                     side, level, pending_ext,
                 )
                 _cancel_wait_logged_at[key] = _now
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(_CANCEL_PENDING_SLEEP_S)
             continue
 
         try:
             async with condition:
-                await asyncio.wait_for(condition.wait(), timeout=5.0)
+                await asyncio.wait_for(condition.wait(), timeout=_BBO_WAKE_TIMEOUT_S)
         except asyncio.TimeoutError:
             pass
         except asyncio.CancelledError:
@@ -123,6 +131,23 @@ async def level_task(s: Any, side: OrderSide, level: int) -> None:
 
 
 async def maybe_reprice(s: Any, side: OrderSide, level: int) -> None:
+    key = (str(side), level)
+    locks = getattr(s, "_level_reprice_locks", None)
+    if locks is None:
+        await _maybe_reprice_unlocked(s, side, level)
+        return
+
+    lock = locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        locks[key] = lock
+    if lock.locked():
+        return
+    async with lock:
+        await _maybe_reprice_unlocked(s, side, level)
+
+
+async def _maybe_reprice_unlocked(s: Any, side: OrderSide, level: int) -> None:
     sync_quote_halt_state(s)
     if s._quote_halt_reasons:
         return
@@ -131,6 +156,13 @@ async def maybe_reprice(s: Any, side: OrderSide, level: int) -> None:
 
 
 def build_reprice_market_context(s: Any) -> RepriceMarketContext:
+    now = time.monotonic()
+    cached = getattr(s, "_market_ctx_cache", None)
+    if cached is not None:
+        cached_ts, cached_ctx = cached
+        if (now - cached_ts) <= _MARKET_CONTEXT_CACHE_TTL_S:
+            return cached_ctx
+
     if s._settings.market_profile == "crypto":
         regime = s._volatility.evaluate()
         trend = s._trend_signal.evaluate()
@@ -142,7 +174,7 @@ def build_reprice_market_context(s: Any) -> RepriceMarketContext:
     if not isinstance(rate_limit_multiplier, Decimal):
         rate_limit_multiplier = Decimal("1")
     min_interval *= float(rate_limit_multiplier)
-    return RepriceMarketContext(
+    ctx = RepriceMarketContext(
         regime=regime,
         trend=trend,
         min_reprice_interval_s=min_interval,
@@ -150,6 +182,9 @@ def build_reprice_market_context(s: Any) -> RepriceMarketContext:
         funding_bias_bps=s._funding_bias_bps(),
         inventory_band=s._pricing.inventory_band(),
     )
+    if hasattr(s, "_market_ctx_cache"):
+        s._market_ctx_cache = (now, ctx)
+    return ctx
 
 
 def record_reprice_decision(s: Any, **kwargs: Any) -> None:

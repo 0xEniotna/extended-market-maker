@@ -206,6 +206,69 @@ async def test_stream_loop_resets_backoff_on_event():
     assert sleep_delays[0] == pytest.approx(2.5, abs=0.1)
 
 
+@pytest.mark.asyncio
+async def test_stream_loop_does_not_reset_backoff_on_seq_gap_loop():
+    """A persistent sequence-gap loop must not keep resetting backoff to 2s.
+
+    Regression test for F-AS1: previously, ``consecutive_failures = 0`` was
+    set on connect-success (before the first event), so a gap raised on
+    the first handled event left backoff at 2s forever. With the fix, the
+    reset only happens after an event survives ``_handle_event`` without
+    raising, so the gap-loop scenario must escalate.
+    """
+    config = SimpleNamespace(stream_url="ws://test")
+    asm = AccountStreamManager(config, "test-key", "TEST-USD")
+    # Skip the fail-safe handler (it would try to call cancel_all_orders on
+    # an unset order_mgr).
+    asm._fail_safe_handler = None
+
+    sleep_delays = []
+
+    class _FakeStreamContext:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            # Emit a single event with seq that always triggers a gap when
+            # _handle_event compares against a non-None _last_seq. We force
+            # _last_seq != None before the iteration so the very first
+            # event raises.
+            if asm._last_seq is None:
+                # Pre-poison: make the first event a "gap" by seeding _last_seq.
+                asm._last_seq = 0
+            return SimpleNamespace(seq=99, data=None)
+
+    asm._stream_client.subscribe_to_account_updates = MagicMock(
+        return_value=_FakeStreamContext()
+    )
+
+    original_sleep = asyncio.sleep
+
+    async def mock_sleep(delay):
+        sleep_delays.append(delay)
+        if len(sleep_delays) >= 4:
+            raise asyncio.CancelledError()
+        await original_sleep(0)
+
+    with patch("market_maker.account_stream.asyncio.sleep", side_effect=mock_sleep):
+        with patch("market_maker.account_stream.random.uniform", return_value=0.5):
+            with pytest.raises(asyncio.CancelledError):
+                await asm._stream_loop()
+
+    # Each iteration: connect succeeds, first event raises seq-gap. The fix
+    # ensures backoff escalates instead of staying flat at 2s.
+    assert len(sleep_delays) >= 3
+    assert sleep_delays[0] == pytest.approx(2.5, abs=0.1)
+    assert sleep_delays[1] >= 4.0  # escalated past first iteration
+    assert sleep_delays[2] >= 8.0
+
+
 # ===========================================================================
 # B. Order Placement Rate Limiter
 # ===========================================================================
@@ -536,7 +599,7 @@ async def test_health_watchdog_no_action_without_orders():
 
 @pytest.mark.asyncio
 async def test_health_watchdog_no_action_before_first_event():
-    """No action taken before first event is received (last_event_ts == 0)."""
+    """No action taken before the account socket has connected."""
     config = SimpleNamespace(stream_url="ws://test")
     asm = AccountStreamManager(config, "test-key", "TEST-USD")
     assert asm.metrics.last_event_ts == 0.0  # No events yet
@@ -558,6 +621,42 @@ async def test_health_watchdog_no_action_before_first_event():
         await asm._connection_health_watchdog()
 
     order_mgr.cancel_all_orders.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_health_watchdog_cancels_connected_stream_before_first_event():
+    """A connected account stream with active orders must deliver an event."""
+    config = SimpleNamespace(stream_url="ws://test")
+    asm = AccountStreamManager(config, "test-key", "TEST-USD")
+    asm._connected = True
+    asm._connected_at_ts = time.monotonic() - 65
+    assert asm.metrics.last_event_ts == 0.0
+
+    order_mgr = MagicMock()
+    order_mgr.active_order_count.return_value = 5
+    order_mgr.cancel_all_orders = AsyncMock()
+    asm.set_order_manager(order_mgr)
+
+    journal = MagicMock()
+    asm.set_journal(journal)
+
+    sleep_count = 0
+
+    async def mock_sleep(delay):
+        nonlocal sleep_count
+        sleep_count += 1
+        if sleep_count >= 2:
+            raise asyncio.CancelledError()
+
+    with patch("market_maker.account_stream.asyncio.sleep", side_effect=mock_sleep):
+        await asm._connection_health_watchdog()
+
+    order_mgr.cancel_all_orders.assert_called_once()
+    journal.record_exchange_event.assert_called_once()
+    assert (
+        journal.record_exchange_event.call_args.kwargs["details"]["reason"]
+        == "account_stream_no_initial_event"
+    )
 
 
 # ===========================================================================

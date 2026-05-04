@@ -392,7 +392,7 @@ class MarketMakerSettings(MarketMakerSettingsBase):
     # --- Logging ---
     log_level: str = Field(default="INFO", description="Log level")
     journal_reprice_decisions: bool = Field(
-        default=True,
+        default=False,
         description="Emit reprice decision telemetry events in the trade journal.",
     )
     fill_snapshot_depth: int = Field(

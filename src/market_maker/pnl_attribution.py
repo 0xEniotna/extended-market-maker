@@ -29,6 +29,7 @@ class PnLSnapshot:
 
     spread_capture_usd: Decimal = Decimal("0")
     inventory_pnl_usd: Decimal = Decimal("0")
+    realized_pnl_usd: Decimal = Decimal("0")
     fee_pnl_usd: Decimal = Decimal("0")
     funding_pnl_usd: Decimal = Decimal("0")
     total_usd: Decimal = Decimal("0")
@@ -69,6 +70,7 @@ class PnLAttributionTracker:
 
         # Cumulative counters.
         self._spread_capture_usd = Decimal("0")
+        self._realized_pnl_usd = Decimal("0")
         self._fee_pnl_usd = Decimal("0")
         self._funding_pnl_usd = Decimal("0")
         self._total_volume_usd = Decimal("0")
@@ -78,8 +80,11 @@ class PnLAttributionTracker:
         self._taker_fill_count = 0
 
         # Inventory tracking for mark-to-market.
+        # _position_cost_basis is signed: positive for net long, negative for
+        # net short. So inventory MTM = net_position × mid − cost_basis works
+        # for both directions (a short's "cost" is the cash received).
         self._net_position = Decimal("0")
-        self._position_cost_basis = Decimal("0")  # weighted avg entry price × qty
+        self._position_cost_basis = Decimal("0")
 
         # Spread capture tracking: per-fill edge from mid.
         self._total_edge_bps_weighted = Decimal("0")  # sum(edge_bps × notional)
@@ -134,28 +139,37 @@ class PnLAttributionTracker:
             self._spread_capture_usd += edge_usd
             self._total_edge_bps_weighted += edge_bps * notional
 
-        # --- Inventory cost basis (FIFO-like weighted average) ---
+        # --- Inventory cost basis (signed, FIFO-like weighted average) ---
         signed_qty = qty if side == "BUY" else -qty
         old_position = self._net_position
 
         if old_position == 0 or (old_position > 0 and side == "BUY") or (old_position < 0 and side == "SELL"):
-            # Increasing position: update cost basis
-            self._position_cost_basis += price * qty
+            # Increasing position: cost basis grows by price × signed_qty so the
+            # sign of cost_basis matches the sign of net_position (cash spent for
+            # longs, cash received for shorts).
+            self._position_cost_basis += price * signed_qty
             self._net_position += signed_qty
         else:
-            # Reducing position: realize P&L against cost basis
+            # Reducing position: realize P&L against the average entry price.
             reduce_qty = min(qty, abs(old_position))
 
-            # Reduce cost basis proportionally
             if abs(old_position) > 0:
+                # avg_entry is positive; signed cost_basis / signed net_position.
+                avg_entry = self._position_cost_basis / old_position
+                sign = Decimal("1") if old_position > 0 else Decimal("-1")
+                self._realized_pnl_usd += reduce_qty * (price - avg_entry) * sign
+                # Proportional reduction preserves sign on the remaining basis.
                 self._position_cost_basis -= self._position_cost_basis * reduce_qty / abs(old_position)
 
             self._net_position += signed_qty
 
-            # If we crossed zero, the remainder opens a new position
+            # If we crossed zero, the remainder opens a new position on the
+            # opposite side. Subtract the signed reducing portion from
+            # signed_qty to get the signed opening portion.
             if abs(signed_qty) > reduce_qty:
-                opening_qty = abs(signed_qty) - reduce_qty
-                self._position_cost_basis += price * opening_qty
+                reducing_signed = -reduce_qty if old_position > 0 else reduce_qty
+                opening_signed_qty = signed_qty - reducing_signed
+                self._position_cost_basis += price * opening_signed_qty
 
     def record_funding_payment(self, amount_usd: Decimal) -> None:
         """Record a funding payment (positive = received, negative = paid)."""
@@ -178,7 +192,13 @@ class PnLAttributionTracker:
             market_value = self._net_position * mid
             inventory_pnl = market_value - self._position_cost_basis
 
-        total = self._spread_capture_usd + inventory_pnl + self._fee_pnl_usd + self._funding_pnl_usd
+        total = (
+            self._spread_capture_usd
+            + inventory_pnl
+            + self._realized_pnl_usd
+            + self._fee_pnl_usd
+            + self._funding_pnl_usd
+        )
 
         # Average spread capture in bps.
         avg_spread_bps = Decimal("0")
@@ -190,6 +210,7 @@ class PnLAttributionTracker:
         return PnLSnapshot(
             spread_capture_usd=self._spread_capture_usd,
             inventory_pnl_usd=inventory_pnl,
+            realized_pnl_usd=self._realized_pnl_usd,
             fee_pnl_usd=self._fee_pnl_usd,
             funding_pnl_usd=self._funding_pnl_usd,
             total_usd=total,

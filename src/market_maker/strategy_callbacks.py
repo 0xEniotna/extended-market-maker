@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections import deque
@@ -12,6 +13,44 @@ logger = logging.getLogger(__name__)
 
 # Maximum number of trade IDs to retain for deduplication.
 _SEEN_TRADE_IDS_MAX = 10_000
+
+
+def _schedule_reprice_after_cancel(strategy, key: tuple[str, int], side: str, level: int) -> None:
+    tasks = getattr(strategy, "_pending_replace_tasks", None)
+    if tasks is None:
+        return
+    existing = tasks.get(key)
+    if existing is not None and not existing.done():
+        return
+    shutdown_event = getattr(strategy, "_shutdown_event", None)
+    if shutdown_event is not None and shutdown_event.is_set():
+        return
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    async def _run() -> None:
+        try:
+            await asyncio.sleep(0)
+            await strategy._maybe_reprice(side, level)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Immediate reprice after cancel failed for %s L%d: %s",
+                side,
+                level,
+                exc,
+                exc_info=True,
+            )
+        finally:
+            if tasks.get(key) is task:
+                tasks.pop(key, None)
+
+    task = loop.create_task(_run(), name=f"mm-replace-after-cancel-{side}-L{level}")
+    tasks[key] = task
 
 
 def on_fill(strategy, fill: FillEvent) -> None:
@@ -136,7 +175,8 @@ def on_level_freed(
     side_for_journal = strategy._normalise_side(side_value)
     order_info = strategy._orders.find_order_by_external_id(external_id)
     exchange_id = order_info.exchange_order_id if order_info is not None else None
-    if current == external_id:
+    slot_was_current = current == external_id
+    if slot_was_current:
         strategy._clear_level_slot(key)
     cancel_reason = strategy._pending_cancel_reasons.pop(
         external_id,
@@ -159,6 +199,8 @@ def on_level_freed(
             level=level,
             reason=cancel_reason,
         )
+        if slot_was_current and cancel_reason == "reprice":
+            _schedule_reprice_after_cancel(strategy, key, side_for_journal, level)
 
     # Apply POF cooldown to prevent immediate retry storms.
     if (

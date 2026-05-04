@@ -129,8 +129,9 @@ def rebuild_components(s: Any) -> None:
         critical_threshold=100.0,
     )
     s._latency_monitor = LatencyMonitor(
-        warn_ms=500.0,
-        critical_ms=5000.0,
+        warn_ms=250.0,
+        critical_ms=1500.0,
+        max_extra_offset_bps=Decimal("8"),
     )
     if not hasattr(s, "_config_rollback"):
         s._config_rollback = ConfigRollbackWatchdog()

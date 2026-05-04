@@ -36,6 +36,9 @@ _CRITICAL_EVENT_TYPES = frozenset({
 _BATCH_FSYNC_INTERVAL_WRITES = 100
 _BATCH_FSYNC_INTERVAL_S = 10.0
 
+# Rate-limit fsync error log to avoid flooding when the disk is failing.
+_FSYNC_ERROR_LOG_INTERVAL_S = 60.0
+
 
 class _DecimalEncoder(json.JSONEncoder):
     """Encode Decimal as string to preserve precision in JSON."""
@@ -78,6 +81,7 @@ class TradeJournal:
         self._last_fsync_ts = time.monotonic()
         # Single-thread executor for non-blocking fsync on SD cards.
         self._fsync_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="journal_fsync")
+        self._fsync_last_error_log_ts = 0.0
 
         ts = time.strftime("%Y%m%d_%H%M%S")
         self._base_stem = f"mm_{market_name}_{ts}"
@@ -138,17 +142,31 @@ class TradeJournal:
             fh = self._fh
             if fh and not fh.closed:
                 fh.flush()
-                self._fsync_executor.submit(self._fsync_fd, fh.fileno())
+                self._fsync_executor.submit(self._fsync_fd, fh.fileno(), self)
         except (OSError, ValueError):
             pass
 
     @staticmethod
-    def _fsync_fd(fd: int) -> None:
-        """Perform the actual os.fsync — runs in the thread-pool."""
+    def _fsync_fd(fd: int, journal: "TradeJournal | None" = None) -> None:
+        """Perform the actual os.fsync — runs in the thread-pool.
+
+        On error, log at most once per ``_FSYNC_ERROR_LOG_INTERVAL_S`` so
+        a failing disk surfaces in the log without flooding it.
+        """
         try:
             os.fsync(fd)
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as exc:
+            if journal is None:
+                return
+            now = time.monotonic()
+            last_log = journal._fsync_last_error_log_ts
+            if (now - last_log) >= _FSYNC_ERROR_LOG_INTERVAL_S:
+                journal._fsync_last_error_log_ts = now
+                logger.warning(
+                    "Background fsync failed for journal %s: %s",
+                    getattr(journal, "_path", "<unknown>"),
+                    exc,
+                )
 
     def _do_fsync_sync(self) -> None:
         """Synchronous flush+fsync for shutdown / rotation (must complete)."""

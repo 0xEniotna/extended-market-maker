@@ -147,6 +147,23 @@ class TestCancelAllPendingCancel:
     """cancel_all_orders should NOT clear _active_orders immediately."""
 
     @pytest.mark.asyncio
+    async def test_place_order_with_permit_skips_pre_send_waits(self):
+        mgr = _make_manager()
+        mgr._rate_state.acquire_rate_token = AsyncMock(return_value=False)
+
+        ext_id = await mgr.place_order(
+            side=OrderSide.BUY,
+            price=Decimal("100"),
+            size=Decimal("1"),
+            level=0,
+            permit=SimpleNamespace(fee_cfg=None),
+        )
+
+        assert ext_id is not None
+        mgr._rate_state.acquire_rate_token.assert_not_called()
+        mgr._client.place_order.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_cancel_all_marks_pending_cancel_instead_of_clearing(self):
         mgr = _make_manager()
         _add_order(mgr, "ext-1")
@@ -235,9 +252,9 @@ class TestCancelAllPendingCancel:
 
         await mgr.cancel_all_orders()
 
-        # On failure, pending_cancel should be cleared and individual
-        # cancel_order calls should have been made
-        assert len(mgr._pending_cancel) == 0
+        # On failure, individual cancel_order calls should be made and
+        # tracked for timeout sweep if the stream terminal update is missed.
+        assert "ext-1" in mgr._pending_cancel
         mgr._client.orders.cancel_order_by_external_id.assert_called_once()
 
 
@@ -714,3 +731,50 @@ class TestBackwardCompatibility:
         assert result is True
         # Should still be in active — stream will clean up
         assert "ext-1" in mgr._active_orders
+        assert "ext-1" in mgr._pending_cancel
+
+    @pytest.mark.asyncio
+    async def test_cancel_order_uses_request_rate_budget(self):
+        mgr = _make_manager()
+        _add_order(mgr, "ext-1")
+        mgr._rate_state.acquire_rate_token = AsyncMock(return_value=False)
+
+        result = await mgr.cancel_order("ext-1")
+
+        assert result is False
+        mgr._rate_state.acquire_rate_token.assert_awaited_once()
+        mgr._client.orders.cancel_order_by_external_id.assert_not_called()
+        assert "ext-1" not in mgr._pending_cancel
+
+    @pytest.mark.asyncio
+    async def test_cancel_all_uses_request_rate_budget(self):
+        mgr = _make_manager()
+        _add_order(mgr, "ext-1")
+        mgr._rate_state.acquire_rate_token = AsyncMock(return_value=False)
+
+        await mgr.cancel_all_orders()
+
+        mgr._rate_state.acquire_rate_token.assert_awaited_once()
+        mgr._client.orders.mass_cancel.assert_not_called()
+        assert "ext-1" not in mgr._pending_cancel
+
+    @pytest.mark.asyncio
+    async def test_single_cancel_pending_sweep_frees_level(self):
+        mgr = _make_manager()
+        _add_order(mgr, "ext-1", level=2)
+        callback_args = []
+        mgr.on_level_freed(lambda *a, **kw: callback_args.append((a, kw)))
+
+        result = await mgr.cancel_order("ext-1")
+        assert result is True
+        assert "ext-1" in mgr._pending_cancel
+
+        mgr._pending_cancel["ext-1"] = time.monotonic() - 20
+        removed = mgr.sweep_pending_cancels(timeout_s=10.0)
+
+        assert removed == 1
+        assert "ext-1" not in mgr._active_orders
+        assert "ext-1" not in mgr._pending_cancel
+        assert len(callback_args) == 1
+        assert callback_args[0][0][:3] == (str(OrderSide.BUY), 2, "ext-1")
+        assert callback_args[0][1]["reason"] == "sweep_pending_cancel_timeout"

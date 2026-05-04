@@ -83,6 +83,22 @@ class TestPnLAttribution:
         snap = t.snapshot(current_mid=Decimal("95"))
         assert snap.inventory_pnl_usd == Decimal("-50")  # 10 * (95-100)
 
+    def test_inventory_pnl_short_mtm(self):
+        """Short MTM: sold 10 at 100, mid drops to 95 → +50 unrealized."""
+        t = PnLAttributionTracker()
+        t.record_fill(
+            side="SELL",
+            price=Decimal("100"),
+            qty=Decimal("10"),
+            fee=Decimal("0"),
+            is_taker=False,
+            mid_price=Decimal("100"),
+        )
+        # Net position = -10, cost_basis = -1000.
+        # At mid=95: market_value = -10 × 95 = -950. inventory = -950 - (-1000) = +50.
+        snap = t.snapshot(current_mid=Decimal("95"))
+        assert snap.inventory_pnl_usd == Decimal("50")
+
     def test_funding_pnl(self):
         t = PnLAttributionTracker()
         t.record_funding_payment(Decimal("5"))
@@ -135,6 +151,106 @@ class TestPnLAttribution:
         )
         snap = t.snapshot()
         assert snap.total_volume_usd == Decimal("1000")
+
+    def test_realized_pnl_round_trip_long(self):
+        """Buy 5 @ 100, sell 5 @ 110 → realized P&L = +50 (long round-trip)."""
+        t = PnLAttributionTracker()
+        # Open: BUY 5 at 100 with mid=100 → no spread capture, no realized.
+        t.record_fill(
+            side="BUY",
+            price=Decimal("100"),
+            qty=Decimal("5"),
+            fee=Decimal("0"),
+            is_taker=False,
+            mid_price=Decimal("100"),
+        )
+        # Close: SELL 5 at 110 with mid=110 → realized = 5 × (110 − 100) = 50.
+        t.record_fill(
+            side="SELL",
+            price=Decimal("110"),
+            qty=Decimal("5"),
+            fee=Decimal("0"),
+            is_taker=False,
+            mid_price=Decimal("110"),
+        )
+        snap = t.snapshot(current_mid=Decimal("110"))
+        assert snap.realized_pnl_usd == Decimal("50")
+        assert snap.inventory_pnl_usd == Decimal("0")  # position closed
+        assert snap.total_usd == Decimal("50")  # spread = 0, fees = 0, funding = 0
+
+    def test_realized_pnl_round_trip_short(self):
+        """Sell 5 @ 110, buy 5 @ 100 → realized P&L = +50 (short round-trip)."""
+        t = PnLAttributionTracker()
+        t.record_fill(
+            side="SELL",
+            price=Decimal("110"),
+            qty=Decimal("5"),
+            fee=Decimal("0"),
+            is_taker=False,
+            mid_price=Decimal("110"),
+        )
+        t.record_fill(
+            side="BUY",
+            price=Decimal("100"),
+            qty=Decimal("5"),
+            fee=Decimal("0"),
+            is_taker=False,
+            mid_price=Decimal("100"),
+        )
+        snap = t.snapshot(current_mid=Decimal("100"))
+        assert snap.realized_pnl_usd == Decimal("50")
+        assert snap.inventory_pnl_usd == Decimal("0")
+        assert snap.total_usd == Decimal("50")
+
+    def test_realized_pnl_partial_reduce(self):
+        """Buy 10 @ 100, sell 4 @ 105 → realized = 4 × 5 = 20, inventory carries 6."""
+        t = PnLAttributionTracker()
+        t.record_fill(
+            side="BUY",
+            price=Decimal("100"),
+            qty=Decimal("10"),
+            fee=Decimal("0"),
+            is_taker=False,
+            mid_price=Decimal("100"),
+        )
+        t.record_fill(
+            side="SELL",
+            price=Decimal("105"),
+            qty=Decimal("4"),
+            fee=Decimal("0"),
+            is_taker=False,
+            mid_price=Decimal("105"),
+        )
+        # At mid=105: remaining 6 long at avg entry 100 → MTM = 6 × 5 = 30.
+        snap = t.snapshot(current_mid=Decimal("105"))
+        assert snap.realized_pnl_usd == Decimal("20")
+        assert snap.inventory_pnl_usd == Decimal("30")
+        assert snap.total_usd == Decimal("50")  # 20 realized + 30 unrealized
+
+    def test_realized_pnl_cross_zero_flip(self):
+        """Long 5 → sell 8 (closes 5 long, opens 3 short) → realized only on the closing 5."""
+        t = PnLAttributionTracker()
+        t.record_fill(
+            side="BUY",
+            price=Decimal("100"),
+            qty=Decimal("5"),
+            fee=Decimal("0"),
+            is_taker=False,
+            mid_price=Decimal("100"),
+        )
+        # Sell 8 at 110: closes 5 long (realized = 5 × 10 = 50), opens 3 short at 110.
+        t.record_fill(
+            side="SELL",
+            price=Decimal("110"),
+            qty=Decimal("8"),
+            fee=Decimal("0"),
+            is_taker=False,
+            mid_price=Decimal("110"),
+        )
+        snap = t.snapshot(current_mid=Decimal("110"))
+        assert snap.realized_pnl_usd == Decimal("50")
+        # Open short 3 at 110, mid=110 → inventory MTM = 0
+        assert snap.inventory_pnl_usd == Decimal("0")
 
 
 # ===================================================================
@@ -227,6 +343,7 @@ class TestLatencyMonitor:
         assert snap.degraded
         assert not snap.halt_quoting
         assert snap.extra_offset_bps > Decimal("0")
+        assert m.extra_offset_bps == snap.extra_offset_bps
 
     def test_halt_state(self):
         m = LatencyMonitor(warn_ms=100.0, critical_ms=500.0)
@@ -260,6 +377,33 @@ class TestLatencyMonitor:
             m.record_latency(500.0)
         snap = m.evaluate()
         assert snap.extra_offset_bps == Decimal("3")
+
+    def test_critical_before_halt_uses_max_widening(self):
+        m = LatencyMonitor(
+            warn_ms=100.0,
+            critical_ms=500.0,
+            max_extra_offset_bps=Decimal("4"),
+        )
+        for _ in range(5):
+            m.record_latency(600.0)
+
+        snap = m.evaluate()
+
+        assert snap.degraded
+        assert not snap.halt_quoting
+        assert snap.extra_offset_bps == Decimal("4")
+        assert m.extra_offset_bps == Decimal("4")
+
+    def test_extra_offset_resets_when_window_empty(self):
+        m = LatencyMonitor(warn_ms=100.0, critical_ms=500.0, window_s=1.0)
+        m.record_latency(200.0)
+        assert m.evaluate().extra_offset_bps > Decimal("0")
+
+        m._samples.clear()
+        snap = m.evaluate()
+
+        assert snap.extra_offset_bps == Decimal("0")
+        assert m.extra_offset_bps == Decimal("0")
 
 
 # ===================================================================

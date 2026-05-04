@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 _DEFAULT_STALENESS_THRESHOLD_S = 15.0
 _DEFAULT_STALE_LOG_INTERVAL_S = 5.0
 _MID_HISTORY_MAX_AGE_S = 120.0
+_MID_HISTORY_SAMPLE_INTERVAL_S = 0.05
+_IMBALANCE_HISTORY_SAMPLE_INTERVAL_S = 0.05
 # Auto-reconnect after this many seconds of staleness.
 _DEFAULT_RECONNECT_AFTER_S = 60.0
 _RECONNECT_BACKOFF_BASE_S = 5.0
@@ -71,6 +73,7 @@ class OrderbookManager:
         # Conditions the strategy waits on
         self.best_bid_condition: asyncio.Condition = asyncio.Condition()
         self.best_ask_condition: asyncio.Condition = asyncio.Condition()
+        self.bbo_condition: asyncio.Condition = asyncio.Condition()
 
         # Cached latest values
         self._last_bid: Optional[PriceLevel] = None
@@ -86,8 +89,12 @@ class OrderbookManager:
         # Mid-price history for short-horizon toxicity metrics.
         self._mid_history: Deque[tuple[float, Decimal]] = deque()
         self._mid_history_max_age_s = _MID_HISTORY_MAX_AGE_S
+        self._mid_history_sample_interval_s = _MID_HISTORY_SAMPLE_INTERVAL_S
+        self._last_mid_record_ts: float = 0.0
         self._imbalance_history: Deque[tuple[float, Decimal]] = deque()
         self._imbalance_history_max_age_s = _MID_HISTORY_MAX_AGE_S
+        self._imbalance_history_sample_interval_s = _IMBALANCE_HISTORY_SAMPLE_INTERVAL_S
+        self._last_imbalance_record_ts: float = 0.0
 
         # Staleness warning throttling.
         self._last_stale_log_ts: float = 0.0
@@ -367,8 +374,24 @@ class OrderbookManager:
             logger.info("Orderbook data fresh again for %s", self._market_name)
 
     async def _on_orderbook_update(self) -> None:
-        """Called by the SDK for every orderbook snapshot/delta event."""
+        """Called by the SDK for every orderbook snapshot/delta event.
+
+        Mid / imbalance / EMA history is recorded here exactly once per
+        event, regardless of whether one or both BBO sides changed. The
+        side-specific bid / ask callbacks only update cached prices and
+        wake their condition variables.
+        """
         self._mark_stream_update()
+        # The helpers expect _last_bid/_last_ask to exist; only run them
+        # when we have at least one BBO snapshot. This also keeps the
+        # callback safe when the SDK calls it before any bid/ask event.
+        if getattr(self, "_last_bid", None) is None:
+            return
+        if getattr(self, "_last_ask", None) is None:
+            return
+        self._update_spread_ema()
+        self._record_mid()
+        self._record_imbalance()
 
     async def _on_snapshot(self, seq: int) -> None:
         _ = seq
@@ -395,6 +418,10 @@ class OrderbookManager:
     async def _on_bid_change(self, raw_bid) -> None:
         """Called by the SDK when the best bid changes.
 
+        Only updates the cached bid and wakes condition variables. Mid /
+        imbalance / EMA recording is centralised in ``_on_orderbook_update``
+        so a single BBO event records exactly one history sample.
+
         Wrapped in a try/except so an error here never kills the SDK's
         background orderbook task.
         """
@@ -404,16 +431,17 @@ class OrderbookManager:
                 return
             self._last_bid = new_bid
             self._mark_stream_update()
-            self._update_spread_ema()
-            self._record_mid()
-            self._record_imbalance()
             async with self.best_bid_condition:
                 self.best_bid_condition.notify_all()
+            await self._notify_bbo_change()
         except Exception as exc:
             logger.error("Error in bid callback: %s", exc, exc_info=True)
 
     async def _on_ask_change(self, raw_ask) -> None:
         """Called by the SDK when the best ask changes.
+
+        Only updates the cached ask and wakes condition variables. Mid /
+        imbalance / EMA recording is centralised in ``_on_orderbook_update``.
 
         Wrapped in a try/except so an error here never kills the SDK's
         background orderbook task.
@@ -424,17 +452,22 @@ class OrderbookManager:
                 return
             self._last_ask = new_ask
             self._mark_stream_update()
-            self._update_spread_ema()
-            self._record_mid()
-            self._record_imbalance()
             async with self.best_ask_condition:
                 self.best_ask_condition.notify_all()
+            await self._notify_bbo_change()
         except Exception as exc:
             logger.error("Error in ask callback: %s", exc, exc_info=True)
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    async def _notify_bbo_change(self) -> None:
+        condition = getattr(self, "bbo_condition", None)
+        if condition is None:
+            return
+        async with condition:
+            condition.notify_all()
 
     def _update_spread_ema(self) -> None:
         """Recompute the EMA-smoothed spread after a bid/ask change."""
@@ -461,8 +494,13 @@ class OrderbookManager:
         if self._last_bid.price <= 0 or self._last_ask.price <= 0:
             return
         now = time.monotonic()
+        min_interval = getattr(self, "_mid_history_sample_interval_s", 0.0)
+        last_record_ts = getattr(self, "_last_mid_record_ts", 0.0)
+        if min_interval > 0 and last_record_ts > 0 and (now - last_record_ts) < min_interval:
+            return
         mid = (self._last_bid.price + self._last_ask.price) / Decimal("2")
         self._mid_history.append((now, mid))
+        self._last_mid_record_ts = now
         self._prune_mid_history(now)
 
     def _prune_mid_history(self, now: Optional[float] = None) -> None:
@@ -525,8 +563,13 @@ class OrderbookManager:
         if denom <= 0:
             return
         now = time.monotonic()
+        min_interval = getattr(self, "_imbalance_history_sample_interval_s", 0.0)
+        last_record_ts = getattr(self, "_last_imbalance_record_ts", 0.0)
+        if min_interval > 0 and last_record_ts > 0 and (now - last_record_ts) < min_interval:
+            return
         imbalance = (bid_size - ask_size) / denom
         self._imbalance_history.append((now, imbalance))
+        self._last_imbalance_record_ts = now
         self._prune_imbalance_history(now)
 
     def _prune_imbalance_history(self, now: Optional[float] = None) -> None:
