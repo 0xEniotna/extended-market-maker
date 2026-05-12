@@ -4,6 +4,7 @@ import math
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
 from typing import Optional, cast
 
+from .funding_aware import FundingAwarePolicy
 from .types import OrderbookLike, PriceLevelLike, PricingSettingsLike, RiskManagerLike
 from .utils import safe_decimal, safe_float
 
@@ -30,6 +31,7 @@ class PricingEngine:
         tick_size: Decimal,
         base_order_size: Decimal,
         min_order_size_step: Decimal,
+        funding_aware: Optional[FundingAwarePolicy] = None,
     ) -> None:
         self._settings = cast(PricingSettingsLike, settings)
         self._ob = cast(OrderbookLike, orderbook_mgr)
@@ -38,6 +40,9 @@ class PricingEngine:
         self._tick_size_f = float(tick_size)
         self._base_order_size = base_order_size
         self._min_order_size_step = min_order_size_step
+        # Optional LQ funding-aware overlay. ``None`` short-circuits the
+        # new path entirely so flag-off is a pure no-op.
+        self._funding_aware: Optional[FundingAwarePolicy] = funding_aware
 
     def _offset_mode(self) -> str:
         mode = self._settings.offset_mode
@@ -197,6 +202,25 @@ class PricingEngine:
             raw_f = best_f - offset_f - skew_offset_f - funding_offset_f
         else:
             raw_f = best_f + offset_f - skew_offset_f - funding_offset_f
+
+        # Funding-aware LQ overlay (heuristic, gated by MM_FUNDING_AWARE_ENABLED).
+        # When the overlay is active, FundingManager.funding_bias_bps() returns 0,
+        # so funding_offset_f above is 0 — no double counting. The policy reads the
+        # raw funding rate from FundingManager via its bound source callable.
+        if self._funding_aware is not None and self._funding_aware.enabled:
+            mid_dec = self._to_decimal(best_price)
+            max_pos_dec = self._to_decimal(self._settings.max_position_size)
+            signal_bps = self._funding_aware.compute_funding_signal_bps(
+                mid_price=mid_dec,
+                max_position_size=max_pos_dec,
+            )
+            signal_offset_f = best_f * float(signal_bps) / 10000.0
+            # F>0 ⇒ signal_bps>0 ⇒ widen bid, tighten ask.
+            # For BUY: raw_f = best - offset; subtracting +signal_offset moves
+            # the bid further below BBO → wider bid. ✓
+            # For SELL: raw_f = best + offset; subtracting +signal_offset moves
+            # the ask closer to BBO → tighter ask. ✓
+            raw_f -= signal_offset_f
 
         # Clamp against BBO (float comparison for speed, Decimal for precision edge)
         bid = cast(Optional[PriceLevelLike], self._ob.best_bid())

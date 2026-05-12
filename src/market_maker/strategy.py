@@ -118,6 +118,17 @@ class MarketMakerStrategy:
         self._drawdown_stop: DrawdownStop
         self._level_pof_until: Dict[tuple[str, int], float]
 
+        # FundingManager must exist before _rebuild_components so the
+        # PricingEngine can be wired with the funding_aware overlay
+        # (which needs FundingManager.funding_rate as its source).
+        self._funding_mgr = FundingManager(
+            market_profile=str(settings.market_profile),
+            funding_bias_enabled=bool(settings.funding_bias_enabled),
+            funding_inventory_weight=settings.funding_inventory_weight,
+            funding_bias_cap_bps=settings.funding_bias_cap_bps,
+            funding_aware_enabled=bool(settings.funding_aware_enabled),
+        )
+
         self._rebuild_components()
 
         self._risk_watchdog = RiskWatchdog(
@@ -130,12 +141,6 @@ class MarketMakerStrategy:
             post_only=self._post_only,
             drawdown_stop=self._drawdown_stop,
             request_shutdown_fn=self._request_shutdown,
-        )
-        self._funding_mgr = FundingManager(
-            market_profile=str(settings.market_profile),
-            funding_bias_enabled=bool(settings.funding_bias_enabled),
-            funding_inventory_weight=settings.funding_inventory_weight,
-            funding_bias_cap_bps=settings.funding_bias_cap_bps,
         )
         self._shutdown_reason = "shutdown"
         self._shutdown_event = asyncio.Event()

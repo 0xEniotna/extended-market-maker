@@ -18,6 +18,7 @@ from .config import ENV_FILE, MarketMakerSettings
 from .config_rollback import ConfigRollbackWatchdog, PerformanceBaseline
 from .drawdown_stop import DrawdownStop
 from .fill_quality import FillQualityTracker
+from .funding_aware import make_policy_if_enabled
 from .guard_policy import GuardPolicy
 from .latency_monitor import LatencyMonitor
 from .pnl_attribution import PnLAttributionTracker
@@ -80,6 +81,29 @@ def rebuild_components(s: Any) -> None:
             "This rollout locks quote_anchor and markout_anchor to 'mid' for coherence."
         )
 
+    # Sync FundingManager with current settings (SIGHUP support). Without
+    # this, a hot-reload that toggles funding_aware_enabled would leave the
+    # manager's flag stale and funding_bias_bps() would not zero correctly.
+    funding_mgr = getattr(s, "_funding_mgr", None)
+    if funding_mgr is not None:
+        funding_mgr.update_settings(
+            market_profile=str(settings.market_profile),
+            funding_bias_enabled=bool(settings.funding_bias_enabled),
+            funding_inventory_weight=settings.funding_inventory_weight,
+            funding_bias_cap_bps=settings.funding_bias_cap_bps,
+            funding_aware_enabled=bool(settings.funding_aware_enabled),
+        )
+
+    # Optional funding-aware LQ overlay (off by default). When the flag is
+    # off, the factory returns None and PricingEngine short-circuits — no
+    # behavior change vs the pre-feature baseline.
+    s._funding_aware = make_policy_if_enabled(
+        enabled=bool(settings.funding_aware_enabled),
+        coupling_bps_max=settings.funding_aware_coupling_bps_max,
+        hold_horizon_periods=settings.funding_aware_hold_horizon_periods,
+        dollar_cap_pct_of_notional=settings.funding_aware_dollar_cap_pct_of_notional,
+        funding_rate_source=lambda: s._funding_mgr.funding_rate,
+    )
     s._pricing = PricingEngine(
         settings=settings,
         orderbook_mgr=s._ob,
@@ -87,6 +111,7 @@ def rebuild_components(s: Any) -> None:
         tick_size=s._tick_size,
         base_order_size=s._base_order_size,
         min_order_size_step=s._min_order_size_step,
+        funding_aware=s._funding_aware,
     )
     s._post_only = PostOnlySafety(
         settings=settings,

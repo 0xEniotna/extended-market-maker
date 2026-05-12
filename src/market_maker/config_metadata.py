@@ -58,8 +58,14 @@ SETTINGS_FIELD_GROUPS: Dict[str, FrozenSet[str]] = {
         "micro_drift_window_s", "micro_drift_max_bps",
         "imbalance_window_s", "imbalance_pause_threshold",
         "volatility_offset_multiplier",
+    }),
+    "funding": frozenset({
         "funding_bias_enabled", "funding_inventory_weight",
         "funding_bias_cap_bps",
+        "funding_aware_enabled",
+        "funding_aware_coupling_bps_max",
+        "funding_aware_hold_horizon_periods",
+        "funding_aware_dollar_cap_pct_of_notional",
     }),
     "operational": frozenset({
         "enabled", "environment", "market_name", "market_profile",

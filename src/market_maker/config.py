@@ -144,6 +144,43 @@ class MarketMakerSettings(MarketMakerSettingsBase):
         description="Absolute cap (bps) for funding carry bias.",
     )
 
+    # --- Funding-Aware Overlay (Le 2026 LQ heuristic) ---
+    funding_aware_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable the heuristic funding-aware carry overlay derived from "
+            "Le 2026 (arXiv:2605.06405) LQ limit. When true, the legacy "
+            "funding_bias_bps contribution is zeroed and replaced with a "
+            "horizon-aware, cash-scaled asymmetric perturbation."
+        ),
+    )
+    funding_aware_coupling_bps_max: Decimal = Field(
+        default=Decimal("8"),
+        ge=0,
+        description=(
+            "Hard cap (bps) on the magnitude of the funding-aware "
+            "perturbation applied to bid or ask offsets."
+        ),
+    )
+    funding_aware_hold_horizon_periods: Decimal = Field(
+        default=Decimal("4"),
+        ge=0,
+        description=(
+            "Effective hold horizon expressed in funding-rate periods used "
+            "to scale the carry signal. Loosely maps to the funding OU "
+            "half-life from the paper (4 ≈ 4 hours on a 1h funding cadence)."
+        ),
+    )
+    funding_aware_dollar_cap_pct_of_notional: Decimal = Field(
+        default=Decimal("0.001"),
+        ge=0,
+        description=(
+            "Soft cap on the dollar funding signal expressed as a fraction "
+            "of (max_position_size × mid). Keeps the knob scale-invariant "
+            "across markets."
+        ),
+    )
+
     # --- Per-Asset Drawdown Stop ---
     drawdown_stop_enabled: bool = Field(
         default=False,

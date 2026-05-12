@@ -28,11 +28,17 @@ class FundingManager:
         funding_bias_enabled: bool,
         funding_inventory_weight: Decimal,
         funding_bias_cap_bps: Decimal,
+        funding_aware_enabled: bool = False,
     ) -> None:
         self._market_profile = market_profile
         self._funding_bias_enabled = funding_bias_enabled
         self._funding_inventory_weight = funding_inventory_weight
         self._funding_bias_cap_bps = funding_bias_cap_bps
+        # When the LQ overlay is active, the legacy bias is zeroed to avoid
+        # double-counting the funding contribution in pricing_engine.
+        # The overlay reads ``funding_rate`` directly, so the refresh task
+        # is also ungated below.
+        self._funding_aware_enabled = funding_aware_enabled
         self._funding_rate = Decimal("0")
 
     @property
@@ -50,7 +56,13 @@ class FundingManager:
         self._funding_rate = value
 
     def funding_bias_bps(self) -> Decimal:
-        """Compute funding bias offset in basis points for pricing skew."""
+        """Compute legacy funding bias offset in basis points.
+
+        Returns ``Decimal("0")`` when the LQ overlay is active so the new
+        policy is the sole funding contributor in ``compute_target_price``.
+        """
+        if self._funding_aware_enabled:
+            return Decimal("0")
         if self._market_profile != "crypto":
             return Decimal("0")
         if not self._funding_bias_enabled:
@@ -72,12 +84,14 @@ class FundingManager:
         funding_bias_enabled: bool,
         funding_inventory_weight: Decimal,
         funding_bias_cap_bps: Decimal,
+        funding_aware_enabled: bool = False,
     ) -> None:
         """Update settings after a hot-reload."""
         self._market_profile = market_profile
         self._funding_bias_enabled = funding_bias_enabled
         self._funding_inventory_weight = funding_inventory_weight
         self._funding_bias_cap_bps = funding_bias_cap_bps
+        self._funding_aware_enabled = funding_aware_enabled
 
     async def refresh_task(
         self,
@@ -88,9 +102,11 @@ class FundingManager:
         """Async task that periodically refreshes the funding rate from the exchange."""
         while not shutdown_event.is_set():
             try:
+                # Refresh whenever either the legacy bias or the LQ overlay
+                # is in use, since both read funding_rate from this manager.
                 if (
                     self._market_profile == "crypto"
-                    and self._funding_bias_enabled
+                    and (self._funding_bias_enabled or self._funding_aware_enabled)
                 ):
                     markets = await client.markets_info.get_markets_dict()  # type: ignore[attr-defined]
                     market_info = markets.get(market_name)
