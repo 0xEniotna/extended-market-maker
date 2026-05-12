@@ -67,3 +67,48 @@ of the new code at ~$0.16 per contract — within rollback envelope.
    in the baseline, May 16-17 weekend in the test). Funding accrues
    on weekends but no trading — exclude weekend hours from PnL/hour
    normalization.
+
+---
+
+## Restart after drawdown_stop incident
+
+### What happened (first run)
+- 2026-05-12 15:48:28 UTC → started (pid 336299).
+- 2026-05-12 18:02:24 UTC → `drawdown_stop` triggered (2h13m uptime).
+  - peak_pnl=+11.36, current_pnl=-14.26, drawdown=$25.62 vs threshold $25.
+  - Flatten BUY 0.701 @ 748.95, slippage 20 bps.
+  - 3 fills, 5,773 cancellations, total fees $0.131.
+- Position cleanly flattened to 0 on shutdown.
+
+### Root cause
+`MM_DRAWDOWN_STOP_PCT_OF_MAX_NOTIONAL=5.0` scales with `MM_MAX_POSITION_NOTIONAL_USD`:
+
+- Production (baseline): 5% × $3,000 = **$150 absolute drawdown threshold**.
+- iter001 (first run): 5% × $500 = **$25 absolute drawdown threshold**.
+
+Cutting notional 6× also cut the drawdown threshold 6×. With MU's
+~2% daily range and an inherited -1.046 short position, $25 fires fast.
+
+**The funding-aware overlay did not cause this.** Max overlay shift on MU
+≈ 3.25 bps ≈ $0.16/contract — three orders of magnitude smaller than
+the $25 drawdown trigger. The PnL move was driven by mid going
+733.59 → ~747.5 over 2h while we were short.
+
+### Fix (option B)
+Bumped `MM_DRAWDOWN_STOP_PCT_OF_MAX_NOTIONAL` from 5.0 → 30.0 in iter001
+so the absolute threshold matches production ($150). The 6× notional cut
+still preserves Phase-5 conservatism on position size.
+
+### Second run
+- 2026-05-12 20:06:19 UTC → started (pid 337803).
+- Position at restart: 0 (clean slate).
+- Settings verified live: drawdown_pct=30.0 → $150 threshold,
+  funding_aware=True, max_notional=$500.
+- New journal: `mm_MU_24_5-USD_20260512_200619.jsonl`.
+- 48h target: 2026-05-14 20:06 UTC.
+
+### Updated comparison plan
+The first 2h13m of run 1 produced a clean drawdown_stop event. That
+window is **excluded** from the Phase-5 analysis because the drawdown
+fired on a *config* problem, not on the overlay. The 48h test starts
+fresh from 20:06 UTC.
