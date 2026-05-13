@@ -1,61 +1,70 @@
-# Stage-2 Diagnostic — Per-Fill Markout Across 4 Markets
+# Stage-2 Diagnostic — Per-Fill Markout Across 4 Markets (pooled)
 
 **Date**: 2026-05-13
 **Question**: is adverse selection biting hard enough on our MM to justify
 Stage-2 (adverse-selection-aware quoting)?
 
-**Method**: `scripts/diagnose_markout.py` reads each market's journal,
-builds a mid-price timeline from every event carrying BBO, then for
-each resting `fill` computes the MM-perspective markout at +1s, +5s,
-+30s, +5min. Positive markout = good for MM, negative = adverse
-selection biting.
+**Method**: `scripts/diagnose_markout.py` reads each market's journals,
+builds a mid-price timeline (per-journal, to avoid cross-boundary
+interpolation), then for each resting `fill` computes the MM-perspective
+markout at +1s, +5s, +30s, +5min. Fills pooled across all journals for
+the market. Positive markout = good for MM, negative = adverse selection
+biting.
 
-**Inputs** (live journals on mm-bot VPS):
+**Inputs** — pooled across ALL substantial journals on mm-bot VPS for
+each market (May 2026 run; March run on different code excluded):
 
-| Market | Journal | Resting fills | Taker excluded |
-|---|---|---|---|
-| ETH-USD (latest) | `mm_ETH-USD_20260506_102154.1.jsonl` | 682 | 0 |
-| ETH-USD (prior) | `mm_ETH-USD_20260506_102154.jsonl` | 677 | 68 |
-| DOT-USD | `mm_DOT-USD_20260510_140533.jsonl` | 19 | 0 |
-| SPX500m-USD | `mm_SPX500m-USD_20260510_140536.jsonl` | 12 | 0 |
-| MU_24_5-USD | `mm_MU_24_5-USD_20260510_140543.jsonl` | 42 | 0 |
+| Market | N journals | Total raw fills | Taker excl. | Resting analyzed |
+|---|---|---|---|---|
+| ETH-USD | 4 | 1,620 | 82 | **1,538** |
+| DOT-USD | 4 | 52 | 2 | **50** |
+| SPX500m-USD | 3 | 65 | 28 | **37** |
+| MU_24_5-USD | 4 | 104 | 3 | **101** |
 
 ---
 
 ## TL;DR — verdict per market
 
-| Market | n | mean markout +5s | mean markout +30s | %neg @ 5s | verdict |
+| Market | n | mean +5s | tight-edge mean | wide-edge mean | verdict |
 |---|---|---|---|---|---|
-| **ETH (latest)** | 682 | **−2.46 bps** | −3.06 bps | 80.8% | **AS biting, statistically rock-solid** |
-| **ETH (prior)** | 677 | **−2.37 bps** | −2.61 bps | – | replicates latest, n=1,359 combined |
-| DOT | 19 | +22.6 bps | +23.0 bps | – | positive but sample too small |
-| SPX500m | 12 | +18.4 bps | +17.4 bps | – | positive but sample too small |
-| MU_24_5 | 42 | +13.3 bps | +12.5 bps | 40.5% | mixed; edge-dependent (see below) |
+| **ETH** | 1,538 | **−2.43 bps** | −2.37 (n=1,489) | (no wide fills) | **Symmetric AS, not edge-dependent** |
+| **MU_24_5** | 101 | +20.9 bps overall | **−5.55** (n=24) | +47.7 (n=44) | **Edge-dependent toxicity** |
+| DOT | 50 | +21.8 bps | +0.6 (n=3) | +26.0 (n=38) | No AS problem |
+| SPX500m | 37 | +12.2 bps | – (n=0) | +20.2 (n=17) | No AS problem |
 
 ### Headline conclusion
 
-**Adverse selection is real and measurable on ETH.** Two independent
-journals, 1,359 combined resting fills, mean markout −2.4 bps at +5s
-with 80%+ of fills negative. Standard error of the mean is roughly
-0.07 bps — the −2.4 bps signal is ~35σ from zero. This is not noise.
+**Adverse selection is real on ETH and on the tight bucket of MU.
+It's NOT a fleet-wide problem.**
 
-**On the other 3 markets, we don't have enough fills to call it.** DOT
-and SPX show positive markouts but with n=12–19 the confidence interval
-is wider than the effect. MU shows an interesting edge-bucket pattern
-worth following up.
+- **ETH**: −2.43 bps mean markout at +5s on n=1,538 fills pooled across
+  4 journals. Standard error ~0.07 bps → ~35σ from zero. Symmetric on
+  both sides (BUY −2.5, SELL −2.3) and not edge-dependent — even the
+  small mid-edge bucket is worse (−4.0 bps). Widening alone won't fix
+  this; needs a markout-feedback policy.
+
+- **MU**: overall markout is +20.9 bps, but this hides a clear pattern.
+  The 24 fills at tight edge (0-5 bps) lose −5.5 bps each; the 77 fills
+  at med+wide edge make +4.6 to +47.7. **The tight bucket is toxic and
+  the rest is clean** — exactly Paper A's `β > κ` (informed-trader-
+  exploits-tight-quote) regime. Raising `MM_MIN_OFFSET_BPS` would
+  selectively cut the toxic bucket.
+
+- **DOT** and **SPX**: both clean. n is moderate (50 / 37) but with
+  >+10 bps mean markout and 0-10% negative, AS is not a problem.
 
 ---
 
 ## ETH detail
 
-### Overall (n=682, latest journal)
+### Overall (n=1,538 pooled across 4 May journals)
 
-| horizon | mean | median | %neg |
-|---|---|---|---|
-| +1s | −1.88 bps | −1.51 | **86.4%** |
-| +5s | −2.46 bps | −2.31 | **80.8%** |
-| +30s | −3.06 bps | −2.79 | 65.8% |
-| +300s | −2.90 bps | −2.36 | 54.3% |
+| horizon | mean | median |
+|---|---|---|
+| +1s | −1.92 bps | −1.50 |
+| +5s | −2.43 bps | −2.18 |
+| +30s | −2.89 bps | −2.70 |
+| +300s | −2.44 bps | −1.91 |
 
 Monotonic deepening to 30s, then plateau. Classic AS signature where
 post-fill mid drifts against us in the first half-minute, then
@@ -65,98 +74,128 @@ neutralizes (consistent with informed-flow horizon ~30s).
 
 | side | n | h1s | h5s | h30s | h300s |
 |---|---|---|---|---|---|
-| BUY | 338 | −2.00 | −2.53 | −3.89 | +0.53 |
-| SELL | 344 | −1.76 | −2.39 | −2.24 | −6.26 |
+| BUY | 757 | −2.02 | −2.54 | −3.09 | −0.38 |
+| SELL | 781 | −1.82 | −2.32 | −2.70 | −4.43 |
 
 Both sides bleed roughly equally in the short run. **Symmetric
 adverse selection** — informed flow hits both bids and asks. This is
 expected on a competitive CLOB where directional information flows
 randomly.
 
-### By edge bucket at fill — wider quotes don't help (this is the key finding)
+### By edge bucket at fill — wider quotes don't help
 
 | edge bucket | n | mean markout +5s | %neg |
 |---|---|---|---|
-| tight (0–5 bps) | 671 | −2.43 | 81.1% |
-| med (5–15 bps) | 11 | **−4.04** | 63.6% |
+| neg_edge (<0) | 1 | −6.14 | 100.0% |
+| tight (0–5 bps) | 1,489 | −2.37 | 78.4% |
+| med (5–15 bps) | 48 | **−4.04** | 70.8% |
 | wide (≥15 bps) | 0 | – | – |
 
-Naively you'd expect wider quotes to be safer (informed flow only
-crosses tight quotes). On ETH that's NOT what we see — the small
-sample of mid-edge fills is **worse**, not better. Implication: the
-toxic flow on ETH isn't a simple "informed trader picks off our
-tight quote" — it's more general post-trade drift. May respond to a
-markout-feedback policy but probably not to a static-widen.
+96.8% of ETH fills happen at tight (0-5 bps) edge — that's where AS
+manifests. The mid-edge bucket (48 fills) is **worse**, not better.
+Implication: the toxic flow on ETH isn't a simple "informed trader
+picks off our tight quote" — it's general post-trade drift. Static
+widening probably won't help; a markout-feedback policy that responds
+to recent fill outcomes can.
 
 ### Economic impact
 
-- 1,359 resting fills over ~10 days of journal coverage.
+- 1,538 resting fills over ~10 days of pooled journal coverage.
 - ETH `MM_MAX_POSITION_SIZE=5`, mid ~$2,300 → typical fill notional
-  small (level-spread fractions of max), probably $500–$1,500 per fill.
-- At $1,000 notional × 2.4 bps × 1,359 fills = **~$326 of AS bleed
-  over the window**, or ~$32/day on ETH alone.
-- Reference: fleet PnL is on the order of $50/day across 3 markets.
-  ETH AS is roughly the same order of magnitude. **Recovering this
-  is meaningful.**
+  small (a fraction of max, depending on level), probably $500–$1,500.
+- At $1,000 notional × 2.4 bps × 1,538 fills = **~$370 of AS bleed**
+  over the window, or ~$37/day on ETH alone.
+- Reference: fleet PnL ~$50/day across 3 markets. ETH AS bleed is
+  on the same order. **Recovering it is meaningful.**
 
 ---
 
-## MU detail
+## MU detail (n=101 pooled across 4 journals)
 
-### Edge-dependent toxicity
+### Edge-dependent toxicity — confirmed at n=101
 
 | edge bucket | n | mean markout +5s | %neg |
 |---|---|---|---|
-| tight (0–5 bps) | 20 | **−6.4** | **70.0%** |
-| med (5–15 bps) | 11 | +7.3 | 9.1% |
-| wide (≥15 bps) | 11 | +55.3 | 18.2% |
+| tight (0–5 bps) | 24 | **−5.55** | **70.8%** |
+| med (5–15 bps) | 33 | +4.57 | 24.2% |
+| wide (≥15 bps) | 44 | +47.68 | 9.1% |
 
-This is the most interesting per-market finding. On MU:
-- Tight quotes (level-0) **lose** −6.4 bps on average.
-- Wider quotes (level-1 + wide-regime) **win** +7 to +55 bps.
+The earlier n=42 finding replicates. On MU:
+- Tight quotes **lose** −5.5 bps on average (24 fills, 71% negative).
+- Mid-edge quotes **win** +4.6 bps (33 fills).
+- Wide quotes **win big** +47.7 bps (44 fills, 91% positive).
 
-Interpretation: MU's order flow has a "informed-trader-exploits-tight-
+Interpretation: MU's order flow has an "informed-trader-exploits-tight-
 quote" component. This is Paper A's `β > κ` regime — informed
-counterparties trade aggressively into thin top-of-book. Widening
-`MM_MIN_OFFSET_BPS` (currently 4 on MU) by a few bps would likely
-move PnL.
+counterparties trade aggressively into thin top-of-book. Raising
+`MM_MIN_OFFSET_BPS` (currently 4 on MU) selectively cuts the toxic
+bucket while preserving the profitable mid+wide buckets.
 
-Small caveat: n=20 in the tight bucket. Replicate on more journals
-before betting on this.
+The aggregate markout is **+20.9 bps** because the wide bucket
+dominates; this masks the tight-bucket toxicity that's worth fixing.
 
 ### By side — strongly asymmetric on MU
 
 | side | n | h1s | h5s | h30s | h300s |
 |---|---|---|---|---|---|
-| BUY | 22 | +2.1 | +5.4 | +11.0 | −2.8 |
-| SELL | 20 | **+23.2** | **+22.1** | +14.2 | −11.6 |
+| BUY | 55 | +7.96 | +7.31 | +7.13 | +6.49 |
+| SELL | 46 | **+39.03** | **+37.24** | +37.81 | +40.22 |
 
-Our SELL fills make money short-term, our BUY fills break even. This
-likely means MU has had a downtrend over the journal window (selling
-into a falling market is profitable). Not a static AS signature; a
-market-regime signature. Less actionable.
+SELL fills make 4-5× more than BUY fills. The pattern persists across
+all horizons including +5min, so this isn't a short-term post-trade
+drift artifact — it's a structural asymmetry in MU's price action
+over the journal window (likely downtrend favoring shorts). Not a
+classical AS signature; more a market-regime artifact. Less actionable
+than the edge-bucket finding.
+
+---
+
+## DOT & SPX detail — confirmed no AS problem
+
+### DOT (n=50)
+
+| edge bucket | n | mean markout +5s | %neg |
+|---|---|---|---|
+| tight (0–5 bps) | 3 | +0.61 | 33% |
+| med (5–15 bps) | 9 | +10.88 | 0% |
+| wide (≥15 bps) | 38 | +26.02 | 0% |
+
+By side: BUY +27.7, SELL +15.3 — both positive. 76% of fills happen
+at wide edge; the bot is essentially printing money at +26 bps/fill
+on the wide bucket. No intervention needed.
+
+### SPX500m (n=37)
+
+| edge bucket | n | mean markout +5s | %neg |
+|---|---|---|---|
+| med (5–15 bps) | 20 | +5.42 | 10% |
+| wide (≥15 bps) | 17 | +20.19 | 0% |
+
+By side: BUY +10.9, SELL +14.1 — symmetric and clean. Zero tight fills
+(bot doesn't quote tight on SPX). No intervention needed.
 
 ---
 
 ## What this changes for Stage 2
 
-**The diagnostic was the right first step.** It told us:
+The pooled diagnostic told us:
 
-1. **Stage 2 is worth doing — but only as a markout-feedback policy on
-   ETH, not as a full Paper-A/Paper-B port.** ETH has the signal, the
-   sample size, and the symmetric AS pattern that responds to a simple
-   per-side feedback loop.
+1. **AS is real on ETH** (n=1,538, +5s markout −2.43 bps, ~35σ from
+   zero). Worth ~$37/day in avoidable bleed. Symmetric, not edge-
+   dependent. Needs a **markout-feedback policy**.
 
-2. **Paper A and Paper B's full machinery is overkill.** Neither was
-   designed for our anonymous CLOB. A 50-LOC markout-feedback overlay
-   captures the actionable insight.
+2. **AS is real on MU's tight bucket** (n=24, −5.55 bps, 71% negative).
+   But MU's overall markout is +20.9 bps because the wider buckets are
+   very profitable. Selectively cutting the tight bucket via
+   `MM_MIN_OFFSET_BPS` would isolate the toxic flow without losing
+   the good flow. **Config-only experiment.**
 
-3. **MU's pattern points to a config-level fix first.** Before any
-   stage-2 code, try `MM_MIN_OFFSET_BPS` 4 → 6 or 4 → 8 on MU iter002.
-   That's a one-line env change with no new code.
+3. **DOT and SPX have no AS problem.** With n=50/37 and overall markouts
+   +21.8/+12.2 bps, those bots work. Nothing to do.
 
-4. **DOT and SPX need more data before any decision.** Not enough
-   fills to distinguish signal from noise.
+4. **Paper A and Paper B are wrong tools.** Both are dealer/broker
+   models for client-identified flow. Our ETH problem is a simple
+   per-side feedback signal; a 50-LOC overlay captures it.
 
 ### Proposed Stage 2 plan (revised, scoped down)
 
@@ -187,16 +226,16 @@ per-flag.
 6 on a `.env.mu_24_5.iter002` and run 48h. No code change. Compare to
 baseline.
 
-**C. Re-run diagnostic in 2 weeks.** With another week of data, DOT
-and SPX should have enough fills to call.
+**C. DOT/SPX**: re-run diagnostic in 2-4 weeks for more fills, but
+prior is "leave them alone — they work".
 
 ---
 
 ## Files
 
-- `scripts/diagnose_markout.py` — the tool
-- `docs/stage2_markout_ETH-USD.md` — ETH full report (n=682)
-- `docs/stage2_markout_ETH_prior.md` — ETH cross-check (n=677)
-- `docs/stage2_markout_DOT-USD.md` — DOT (n=19, inconclusive)
-- `docs/stage2_markout_SPX500m-USD.md` — SPX (n=12, inconclusive)
-- `docs/stage2_markout_MU_24_5-USD.md` — MU full report (n=42)
+- `scripts/diagnose_markout.py` — the tool (supports multi-journal pooling)
+- `docs/stage2_markout_ETH_pooled.md` — ETH report (n=1,538, 4 journals)
+- `docs/stage2_markout_MU_pooled.md` — MU report (n=101, 4 journals)
+- `docs/stage2_markout_DOT_pooled.md` — DOT report (n=50, 4 journals)
+- `docs/stage2_markout_SPX_pooled.md` — SPX report (n=37, 3 journals)
+- Earlier per-journal reports retained for reference (single-journal series)

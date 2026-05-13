@@ -267,16 +267,20 @@ def aggregate(diag: dict) -> dict:
     return out
 
 
-def render(market: str, journal_path: Path, diag: dict, agg: dict) -> str:
+def render(market: str, journal_paths: list[Path] | Path, diag: dict, agg: dict) -> str:
+    if isinstance(journal_paths, Path):
+        journal_paths = [journal_paths]
+    journal_block = "\n".join(f"- Journal: `{p}`" for p in journal_paths)
     lines: list[str] = [
         f"# Per-Fill Markout Diagnostic — {market}",
         "",
-        f"- Journal: `{journal_path}`",
+        f"- N journals pooled: {len(journal_paths)}",
+        journal_block,
         f"- Total fills: {diag['n_total_fills']}",
         f"- Taker fills (excluded — shutdown flatten / hedge): {diag['n_taker_fills']}",
         f"- Resting-order fills analyzed: {diag['n_resting_fills']}",
         f"- Side distribution: {diag['sides']}",
-        f"- Mid timeline size: {diag['mid_timeline_size']:,} observations",
+        f"- Mid timeline size (pooled): {diag['mid_timeline_size']:,} observations",
         "",
         "Convention: **markout in bps, signed from MM perspective**.",
         "Positive = good for MM (we were on the right side of post-fill mid drift).",
@@ -367,20 +371,60 @@ def render(market: str, journal_path: Path, diag: dict, agg: dict) -> str:
     return "\n".join(lines)
 
 
+def diagnose_many(journal_paths: list[Path]) -> dict:
+    """Pool fills across multiple journals. Mid timeline is per-journal.
+
+    Within one journal we can interpolate mid forward in time; we cannot
+    cross journal boundaries because there's typically a gap. We compute
+    each fill's markout against its own journal's timeline, then pool
+    the markouts across journals for aggregation.
+    """
+    all_fills: list[dict] = []
+    n_total = 0
+    n_taker = 0
+    sides: Counter = Counter()
+    per_journal: list[dict] = []
+    for path in journal_paths:
+        d = diagnose(path)
+        per_journal.append({
+            "path": str(path),
+            "total_fills": d["n_total_fills"],
+            "taker_fills": d["n_taker_fills"],
+            "resting_fills": d["n_resting_fills"],
+            "mid_obs": d["mid_timeline_size"],
+        })
+        n_total += d["n_total_fills"]
+        n_taker += d["n_taker_fills"]
+        for s, c in d["sides"].items():
+            sides[s] += c
+        all_fills.extend(d["fills"])
+    return {
+        "n_total_fills": n_total,
+        "n_taker_fills": n_taker,
+        "n_resting_fills": len(all_fills),
+        "sides": dict(sides),
+        "fills": all_fills,
+        "mid_timeline_size": sum(d["mid_obs"] for d in per_journal),
+        "per_journal": per_journal,
+    }
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--market", required=True)
-    p.add_argument("--journal", type=Path, required=True)
+    p.add_argument("--journal", type=Path, action="append", required=True,
+                   help="Repeat for multiple journals; fills are pooled.")
     p.add_argument("--out", type=Path, required=True)
     args = p.parse_args()
 
-    print(f"== {args.market} ==")
-    print(f"  journal: {args.journal}")
-    diag = diagnose(args.journal)
-    print(f"  total fills: {diag['n_total_fills']}")
+    print(f"== {args.market} ({len(args.journal)} journal(s)) ==")
+    for j in args.journal:
+        print(f"  journal: {j}")
+    diag = diagnose_many(args.journal)
+    print(f"  total fills (raw): {diag['n_total_fills']}")
     print(f"  taker fills (excluded): {diag['n_taker_fills']}")
     print(f"  resting fills analyzed: {diag['n_resting_fills']}")
-    print(f"  mid observations: {diag['mid_timeline_size']:,}")
+    print(f"  mid observations (pooled): {diag['mid_timeline_size']:,}")
 
     agg = aggregate(diag)
     md = render(args.market, args.journal, diag, agg)
