@@ -112,3 +112,48 @@ The first 2h13m of run 1 produced a clean drawdown_stop event. That
 window is **excluded** from the Phase-5 analysis because the drawdown
 fired on a *config* problem, not on the overlay. The 48h test starts
 fresh from 20:06 UTC.
+
+---
+
+## iter001 → iter002 cutover (Stage-2 widening experiment)
+
+### Why
+Stage-2 markout diagnostic (`docs/stage2_markout_summary.md`) showed
+MU has edge-dependent toxicity: the tight (0-5 bps edge) fill bucket
+loses −5.55 bps mean markout on n=24, while med+wide buckets are
+strongly profitable. Hypothesis: raising `MM_MIN_OFFSET_BPS` from 4
+to 6 cuts the toxic bucket without losing the profitable ones.
+
+### iter001 final state (stopped at 2026-05-13 ~11:11 UTC)
+- Window: 2026-05-12 20:06:19 → 2026-05-13 11:11 UTC (≈15h)
+- Realized PnL contribution: +$72.52 (cumulative $164.26 vs $91.74 at
+  cutover yesterday)
+- 2 closed positions during the window (10 → 12)
+- 6 fills earlier check, more after; not enough to verdict Stage-1
+- Position at stop: −0.173 short (preserved on exchange)
+
+### iter002 launch
+- 2026-05-13 11:12 UTC → started (pid 342581)
+- Inherits −0.173 short from iter001 (exchange-side position).
+- Single diff vs iter001: `MM_MIN_OFFSET_BPS=4 → 6`. Everything else
+  identical (funding-aware ON, max notional $500, drawdown pct 30%).
+- New journal: `mm_MU_24_5-USD_<ts>.jsonl` under
+  `/root/MM-funding-aware/data/mm_journal/`.
+- 48h target: 2026-05-15 ~11:12 UTC.
+
+### Two intertwined experiments now
+The MU iter001 window was the funding-aware Stage-1 test. iter002
+keeps funding-aware ON and changes only `MM_MIN_OFFSET_BPS`. So:
+- The funding-aware overlay continues to be tested (versus
+  pre-Stage-1 production baseline at `.env.mu_24_5`).
+- The widening is tested against iter001 — same funding-aware code,
+  different min-offset.
+
+Cleanest A/B is iter002 vs iter001 on the min_offset effect. If we
+later want to isolate funding-aware on its own, that would require a
+separate iter003 with overlay OFF.
+
+### Rollback
+- Stop iter002: `cd /root/MM-funding-aware && PYTHONPATH=... PATH=... mmctl stop mu_24_5.iter002`
+- Resume iter001: `mmctl start mu_24_5.iter001`
+- Or revert to production: `cd /root/MM && mmctl start mu_24_5`
