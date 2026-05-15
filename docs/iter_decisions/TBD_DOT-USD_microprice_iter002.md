@@ -23,7 +23,7 @@ Replacing the mid-price reference in `compute_target_price` with the depth-weigh
 
 All other knobs **identical** to baseline. Will verify via `journal_config_history.py` after launch (post-mortem).
 
-Code change: `src/market_maker/microprice.py` (new) + `src/market_maker/pricing_engine.py` (~10 lines). All on branch `microprice-ofi`. Worktree path: `/root/MM-microprice-ofi/` (to be created on VPS).
+Code change: `src/market_maker/microprice.py` (new) + `src/market_maker/pricing_engine.py` (~10 lines). All on branch `microprice-ofi`. Worktree path: `/root/MM-funding-aware/ (after `git checkout microprice-ofi` in that worktree)` (to be created on VPS).
 
 ---
 
@@ -73,8 +73,8 @@ Specifically here:
 
 Rollback procedure:
 ```bash
-ssh mm-bot 'cd /root/MM-microprice-ofi && PATH=/root/MM/.venv/bin:$PATH \
-  PYTHONPATH=/root/MM-microprice-ofi/src mmctl stop DOT-USD.iter002'
+ssh mm-bot 'cd /root/MM-funding-aware && PATH=/root/MM/.venv/bin:$PATH \
+  PYTHONPATH=/root/MM-funding-aware/ (after `git checkout microprice-ofi` in that worktree)src mmctl stop DOT-USD.iter002'
 ssh mm-bot 'cd /root/MM && PATH=/root/MM/.venv/bin:$PATH mmctl start DOT-USD'
 ```
 

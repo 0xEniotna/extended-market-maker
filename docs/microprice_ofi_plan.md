@@ -148,11 +148,31 @@ If volume becomes a problem later:
 
 ### Rollout
 
-1. Code + tests on `microprice-ofi` branch, commit.
-2. Deploy to **DOT-USD only** first (lowest blast radius).
-3. Monitor 24h: check journal size growth, no perf regression, no error spike.
-4. If clean, expand to NEAR-USD and XNG-USD.
-5. After ≥24-48h of `book_change` accrual on DOT, Phase 2 can run.
+Reuses the existing `/root/MM-funding-aware/` worktree on the VPS (currently
+idle — no bots running from it per `project_fleet.md`). Just switch its
+branch to `microprice-ofi`:
+
+```bash
+ssh mm-bot 'cd /root/MM-funding-aware && git fetch && git checkout microprice-ofi'
+# Migrate DOT-USD off /root/MM/ (main) to /root/MM-funding-aware/ (microprice-ofi)
+ssh mm-bot 'cd /root/MM && PATH=/root/MM/.venv/bin:$PATH mmctl stop DOT-USD'
+ssh mm-bot 'ln -sf /root/MM/.env.DOT-USD /root/MM-funding-aware/.env.DOT-USD'
+ssh mm-bot 'cd /root/MM-funding-aware && PYTHONPATH=/root/MM-funding-aware/src \
+  PATH=/root/MM/.venv/bin:$PATH mmctl start DOT-USD'
+```
+
+1. Code + tests on `microprice-ofi` branch, push to origin.
+2. Checkout `microprice-ofi` in `/root/MM-funding-aware/`.
+3. Stop DOT-USD on `/root/MM/` (main), restart on `/root/MM-funding-aware/`.
+   This is just an env change — DOT runs the same `.env.DOT-USD` baseline,
+   only the code path differs (with book_change instrumentation enabled).
+4. Monitor 24h: check journal size growth, no perf regression, no error spike.
+5. If clean, do the same migration for NEAR-USD and XNG-USD.
+6. After ≥24-48h of `book_change` accrual on DOT, Phase 2 can run.
+
+To roll back: `mmctl stop DOT-USD` on the worktree, `mmctl start DOT-USD` on
+`/root/MM/`. Branch separation is preserved — `funding-aware-mm` is unchanged
+in origin; the worktree just temporarily tracks `microprice-ofi`.
 
 ### Acceptance criteria
 

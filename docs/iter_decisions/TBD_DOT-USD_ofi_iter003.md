@@ -26,7 +26,7 @@ Adding a calibrated OFI-driven skew term to `signal_offset_f` will reduce mean +
 
 All other knobs **identical** to post-iter002 baseline. Will verify via `journal_config_history.py` after launch.
 
-Code change: `src/market_maker/ofi_signal.py` (new) + `src/market_maker/pricing_engine.py` (~5 lines additive). All on branch `microprice-ofi`. Worktree path: `/root/MM-microprice-ofi/`.
+Code change: `src/market_maker/ofi_signal.py` (new) + `src/market_maker/pricing_engine.py` (~5 lines additive). All on branch `microprice-ofi`. Worktree path: `/root/MM-funding-aware/ (after `git checkout microprice-ofi` in that worktree)`.
 
 ---
 
@@ -83,8 +83,8 @@ Specifically here:
 
 Rollback procedure:
 ```bash
-ssh mm-bot 'cd /root/MM-microprice-ofi && PATH=/root/MM/.venv/bin:$PATH \
-  PYTHONPATH=/root/MM-microprice-ofi/src mmctl stop DOT-USD.iter003'
+ssh mm-bot 'cd /root/MM-funding-aware && PATH=/root/MM/.venv/bin:$PATH \
+  PYTHONPATH=/root/MM-funding-aware/ (after `git checkout microprice-ofi` in that worktree)src mmctl stop DOT-USD.iter003'
 ssh mm-bot 'cd /root/MM && PATH=/root/MM/.venv/bin:$PATH mmctl start DOT-USD'
 ```
 
