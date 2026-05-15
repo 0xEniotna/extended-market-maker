@@ -11,8 +11,7 @@ from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
 
-from market_maker.cli.common import PROJECT_ROOT, to_jsonable
-
+from market_maker.cli.common import PROJECT_ROOT
 
 # ---------------------------------------------------------------------------
 # mmctl markets info (lifted from scripts/tools/fetch_market_info.py)
@@ -123,19 +122,19 @@ def _run_market_info(args) -> int:
     print(f"Market: {market.get('name')}")
     print(f"Status: {market.get('status')} active={market.get('active')}")
     print(f"Asset: {market.get('assetName')} collateral={market.get('collateralAssetName')}")
-    print(f"\nTrading config:")
+    print("\nTrading config:")
     print(f"  minOrderSize: {_fmt(min_order_size)}")
     print(f"  minOrderSizeChange: {_fmt(trading.get('minOrderSizeChange'))}")
     print(f"  minPriceChange: {_fmt(min_price_change)}")
     print(f"  maxPositionValue: {_fmt(trading.get('maxPositionValue'))}")
     print(f"  maxLeverage: {_fmt(trading.get('maxLeverage'))}")
-    print(f"\nMarket stats:")
+    print("\nMarket stats:")
     print(f"  bidPrice: {_fmt(stats.get('bidPrice'))}")
     print(f"  askPrice: {_fmt(stats.get('askPrice'))}")
     print(f"  markPrice: {_fmt(stats.get('markPrice'))}")
     print(f"  dailyVolume: {_fmt(stats.get('dailyVolume'))}")
     print(f"  openInterest: {_fmt(stats.get('openInterest'))}")
-    print(f"\nMM inputs:")
+    print("\nMM inputs:")
     print(f"  tick_size: {_fmt(min_price_change)}")
     print(f"  min_order_size: {_fmt(min_order_size)}")
     if tick_bps is not None:

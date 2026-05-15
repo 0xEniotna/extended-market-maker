@@ -4,8 +4,6 @@ import asyncio
 import json
 import time
 
-import pytest
-
 from market_maker.scout.paper_markout import (
     PaperMarkoutEngine,
     SequenceTracker,

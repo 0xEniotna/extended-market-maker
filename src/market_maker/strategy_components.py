@@ -21,6 +21,7 @@ from .fill_quality import FillQualityTracker
 from .funding_aware import make_policy_if_enabled
 from .guard_policy import GuardPolicy
 from .latency_monitor import LatencyMonitor
+from .markout_feedback import make_policy_if_enabled as make_markout_feedback_policy_if_enabled
 from .pnl_attribution import PnLAttributionTracker
 from .post_only_safety import PostOnlySafety
 from .pricing_engine import PricingEngine
@@ -104,6 +105,30 @@ def rebuild_components(s: Any) -> None:
         dollar_cap_pct_of_notional=settings.funding_aware_dollar_cap_pct_of_notional,
         funding_rate_source=lambda: s._funding_mgr.funding_rate,
     )
+
+    # Optional markout-feedback overlay (off by default). Same null-pattern
+    # as funding_aware — None means no-op in PricingEngine. The mid_source
+    # callable lets the policy query the current mid at markout-computation
+    # time (returns None when orderbook is stale).
+    def _mid_for_markout():
+        bid = s._ob.best_bid()
+        ask = s._ob.best_ask()
+        if bid is None or ask is None:
+            return None
+        if bid.price <= 0 or ask.price <= 0 or ask.price <= bid.price:
+            return None
+        return (bid.price + ask.price) / 2
+
+    s._markout_feedback = make_markout_feedback_policy_if_enabled(
+        enabled=bool(settings.markout_feedback_enabled),
+        half_life_s=settings.markout_feedback_half_life_s,
+        threshold_bps=settings.markout_feedback_threshold_bps,
+        gain=settings.markout_feedback_gain,
+        cap_bps=settings.markout_feedback_cap_bps,
+        horizon_s=int(settings.markout_feedback_horizon_s),
+        mid_source=_mid_for_markout,
+    )
+
     s._pricing = PricingEngine(
         settings=settings,
         orderbook_mgr=s._ob,
@@ -112,6 +137,7 @@ def rebuild_components(s: Any) -> None:
         base_order_size=s._base_order_size,
         min_order_size_step=s._min_order_size_step,
         funding_aware=s._funding_aware,
+        markout_feedback=s._markout_feedback,
     )
     s._post_only = PostOnlySafety(
         settings=settings,

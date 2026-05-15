@@ -181,6 +181,60 @@ class MarketMakerSettings(MarketMakerSettingsBase):
         ),
     )
 
+    # --- Markout-Feedback Overlay (Stage 2) ---
+    markout_feedback_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable the reactive markout-feedback widening overlay. Tracks "
+            "a per-side EWMA of post-fill markouts; when a side bleeds, "
+            "widens that side's quote. Calibrated on ETH journals "
+            "(arXiv/Stage-2 doc; lag-1 autocorrelation ≈ +0.45)."
+        ),
+    )
+    markout_feedback_half_life_s: Decimal = Field(
+        default=Decimal("30"),
+        ge=0,
+        description=(
+            "EWMA half-life in seconds for the per-side markout. Shorter "
+            "= more reactive but noisier; 30s matched the autocorrelation "
+            "decay observed on ETH."
+        ),
+    )
+    markout_feedback_threshold_bps: Decimal = Field(
+        default=Decimal("2.0"),
+        ge=0,
+        description=(
+            "EWMA threshold (bps) below which the policy starts widening. "
+            "Below -threshold the widening kicks in proportionally."
+        ),
+    )
+    markout_feedback_gain: Decimal = Field(
+        default=Decimal("0.5"),
+        ge=0,
+        description=(
+            "Multiplier applied to (|EWMA| - threshold) to compute the "
+            "raw widening. Phase-1 sweep showed 0.5 is sufficient; higher "
+            "gains do not improve targeting."
+        ),
+    )
+    markout_feedback_cap_bps: Decimal = Field(
+        default=Decimal("5"),
+        ge=0,
+        description=(
+            "Hard cap (bps) on the additional widening applied to any "
+            "side. Prevents runaway widening on extreme markout streaks."
+        ),
+    )
+    markout_feedback_horizon_s: int = Field(
+        default=5,
+        ge=0,
+        description=(
+            "Delay (seconds) after a fill before its markout is computed "
+            "and incorporated into the EWMA. +5s matches the empirical "
+            "horizon at which AS is observed on ETH."
+        ),
+    )
+
     # --- Per-Asset Drawdown Stop ---
     drawdown_stop_enabled: bool = Field(
         default=False,

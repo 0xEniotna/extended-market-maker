@@ -5,6 +5,7 @@ from decimal import ROUND_DOWN, ROUND_UP, Decimal
 from typing import Optional, cast
 
 from .funding_aware import FundingAwarePolicy
+from .markout_feedback import MarkoutFeedbackPolicy
 from .types import OrderbookLike, PriceLevelLike, PricingSettingsLike, RiskManagerLike
 from .utils import safe_decimal, safe_float
 
@@ -32,6 +33,7 @@ class PricingEngine:
         base_order_size: Decimal,
         min_order_size_step: Decimal,
         funding_aware: Optional[FundingAwarePolicy] = None,
+        markout_feedback: Optional[MarkoutFeedbackPolicy] = None,
     ) -> None:
         self._settings = cast(PricingSettingsLike, settings)
         self._ob = cast(OrderbookLike, orderbook_mgr)
@@ -43,6 +45,9 @@ class PricingEngine:
         # Optional LQ funding-aware overlay. ``None`` short-circuits the
         # new path entirely so flag-off is a pure no-op.
         self._funding_aware: Optional[FundingAwarePolicy] = funding_aware
+        # Optional markout-feedback overlay. Same null-pattern: ``None``
+        # means flag-off and the new path is bypassed entirely.
+        self._markout_feedback: Optional[MarkoutFeedbackPolicy] = markout_feedback
 
     def _offset_mode(self) -> str:
         mode = self._settings.offset_mode
@@ -221,6 +226,24 @@ class PricingEngine:
             # For SELL: raw_f = best + offset; subtracting +signal_offset moves
             # the ask closer to BBO → tighter ask. ✓
             raw_f -= signal_offset_f
+
+        # Markout-feedback overlay (gated by MM_MARKOUT_FEEDBACK_ENABLED).
+        # When the policy fires on a side, the per-side widening pushes our
+        # quote further from BBO — making that side LESS aggressive — which
+        # is exactly the reaction we want when post-fill markouts on that
+        # side have been negative on average.
+        if self._markout_feedback is not None and self._markout_feedback.enabled:
+            # Process any pending fills whose markout horizon has elapsed.
+            # Cheap when nothing is due. We pass None → policy uses time.time().
+            self._markout_feedback.tick()
+            mf_widen_bps = self._markout_feedback.extra_widening_bps(side_name)
+            if mf_widen_bps > 0:
+                widen_offset_f = best_f * float(mf_widen_bps) / 10000.0
+                # Direction-dependent: widen pushes the quote AWAY from BBO.
+                if is_buy:
+                    raw_f -= widen_offset_f  # bid lower → less aggressive
+                else:
+                    raw_f += widen_offset_f  # ask higher → less aggressive
 
         # Clamp against BBO (float comparison for speed, Decimal for precision edge)
         bid = cast(Optional[PriceLevelLike], self._ob.best_bid())

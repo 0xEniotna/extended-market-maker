@@ -156,6 +156,23 @@ def on_fill(strategy, fill: FillEvent) -> None:
     if qtr is not None and not fill.is_taker:
         qtr.record_fill()
 
+    # --- Markout-feedback overlay: observe resting fill ---
+    # Taker fills (shutdown flatten / forced cancel) are not signal for
+    # adverse selection, so skip them. The policy's horizon timer will
+    # compute the markout asynchronously the next time pricing_engine
+    # ticks past the horizon deadline.
+    mf_policy = getattr(strategy, "_markout_feedback", None)
+    if mf_policy is not None and mf_policy.enabled and not fill.is_taker:
+        # FillEvent.timestamp is epoch ms; convert to seconds for the policy
+        # (which compares against time.time() at query time).
+        try:
+            ts_ms = int(getattr(fill, "timestamp", 0) or 0)
+            ts_value = ts_ms / 1000.0 if ts_ms > 0 else time.time()
+        except (TypeError, ValueError):
+            ts_value = time.time()
+        side_str = strategy._normalise_side(str(fill.side))
+        mf_policy.on_fill(ts=ts_value, side=side_str, price=fill.price)
+
 
 def on_level_freed(
     strategy,

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from market_maker.cli import main as mmctl_main
 from market_maker.mm_config_pipeline import (
     Policy,
     ProposalApplyError,
@@ -16,7 +17,6 @@ from market_maker.mm_config_pipeline import (
     ProposalValidator,
     update_env_lines_preserving_format,
 )
-from market_maker.cli import main as mmctl_main
 
 
 def _write_policy(config_root: Path) -> None:

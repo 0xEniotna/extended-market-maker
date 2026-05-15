@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
 from market_maker.cli.common import PROJECT_ROOT
-
 
 # ---------------------------------------------------------------------------
 # mmctl journal analyze (wraps scripts/analyse_mm_journal.py)
@@ -77,7 +75,8 @@ def _run_reprice_quality(args) -> int:
     if str(scripts_tools) not in sys.path:
         sys.path.insert(0, str(scripts_tools))
 
-    from audit_reprice_quality import build_parser as rq_build_parser, run as rq_run
+    from audit_reprice_quality import build_parser as rq_build_parser
+    from audit_reprice_quality import run as rq_run
 
     rq_parser = rq_build_parser()
     rq_argv = []

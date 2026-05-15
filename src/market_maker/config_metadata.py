@@ -67,6 +67,14 @@ SETTINGS_FIELD_GROUPS: Dict[str, FrozenSet[str]] = {
         "funding_aware_hold_horizon_periods",
         "funding_aware_dollar_cap_pct_of_notional",
     }),
+    "markout_feedback": frozenset({
+        "markout_feedback_enabled",
+        "markout_feedback_half_life_s",
+        "markout_feedback_threshold_bps",
+        "markout_feedback_gain",
+        "markout_feedback_cap_bps",
+        "markout_feedback_horizon_s",
+    }),
     "operational": frozenset({
         "enabled", "environment", "market_name", "market_profile",
         "flatten_position_on_shutdown",
