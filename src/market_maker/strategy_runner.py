@@ -213,6 +213,7 @@ def _register_callbacks(ctx: RuntimeContext) -> None:
     ctx.account_stream.set_journal(ctx.journal)
     ctx.account_stream.set_fail_safe_handler(ctx.strategy._on_stream_desync)
     ctx.ob_mgr.set_fail_safe_handler(ctx.strategy._on_stream_desync)
+    ctx.ob_mgr.set_journal(ctx.journal)
     ctx.order_mgr.set_journal(ctx.journal)
 
 

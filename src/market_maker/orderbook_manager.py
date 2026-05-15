@@ -109,6 +109,19 @@ class OrderbookManager:
         self._sequence_healthy: bool = True
         self._fail_safe_handler: Optional[Callable[[str], Awaitable[None] | None]] = None
 
+        # Optional journal for book_change event emission. Set via
+        # set_journal() during startup; left None when running without a
+        # journal (e.g., in some test paths).
+        self._journal: Optional[Any] = None
+        # Dedup key for book_change emission: (bid_price, bid_size, ask_price,
+        # ask_size). We emit only when this tuple changes, so deeper-book
+        # mutations that don't touch L1 don't generate redundant events.
+        self._last_emitted_l1: Optional[
+            tuple[Decimal, Decimal, Decimal, Decimal]
+        ] = None
+        # Rate-limit book_change emission error logs (one per minute).
+        self._book_change_error_log_ts: float = 0.0
+
     # ------------------------------------------------------------------
     # Public interface
     # ------------------------------------------------------------------
@@ -189,6 +202,13 @@ class OrderbookManager:
         self, cb: Callable[[str], Awaitable[None] | None]
     ) -> None:
         self._fail_safe_handler = cb
+
+    def set_journal(self, journal: Any) -> None:
+        # Injection point matching the existing pattern (account_stream,
+        # order_mgr, order_rate_state). Once set, every L1 mutation will be
+        # journaled as a `book_change` event so flow-OFI is reconstructible
+        # offline (see docs/microprice_ofi_plan.md Phase 0.5).
+        self._journal = journal
 
     def is_sequence_healthy(self) -> bool:
         return self._sequence_healthy
@@ -392,6 +412,7 @@ class OrderbookManager:
         self._update_spread_ema()
         self._record_mid()
         self._record_imbalance()
+        self._maybe_emit_book_change()
 
     async def _on_snapshot(self, seq: int) -> None:
         _ = seq
@@ -468,6 +489,43 @@ class OrderbookManager:
             return
         async with condition:
             condition.notify_all()
+
+    def _maybe_emit_book_change(self) -> None:
+        # Emit a `book_change` journal event when L1 mutates.
+        #
+        # Dedup gate: only emit when (bid_price, bid_qty, ask_price, ask_qty)
+        # differs from the last emitted tuple. Deeper-book mutations that
+        # don't touch L1 are filtered out (saves disk + downstream work).
+        #
+        # Wrapped in try/except so a journal write error cannot kill the
+        # WS callback. Errors are rate-limited to one log per minute.
+        journal = self._journal
+        if journal is None:
+            return
+        bid = self._last_bid
+        ask = self._last_ask
+        if bid is None or ask is None:
+            return
+        current = (bid.price, bid.size, ask.price, ask.size)
+        if current == self._last_emitted_l1:
+            return
+        self._last_emitted_l1 = current
+        try:
+            journal.record_book_change(
+                bid=bid.price,
+                bid_qty=bid.size,
+                ask=ask.price,
+                ask_qty=ask.size,
+            )
+        except Exception as exc:
+            now = time.monotonic()
+            if (now - self._book_change_error_log_ts) >= 60.0:
+                self._book_change_error_log_ts = now
+                logger.error(
+                    "book_change journal write failed for %s: %s",
+                    self._market_name,
+                    exc,
+                )
 
     def _update_spread_ema(self) -> None:
         """Recompute the EMA-smoothed spread after a bid/ask change."""

@@ -343,6 +343,24 @@ class TradeJournal:
             "reason": reason,
         })
 
+    def record_book_change(
+        self,
+        *,
+        bid: Decimal,
+        bid_qty: Decimal,
+        ask: Decimal,
+        ask_qty: Decimal,
+    ) -> None:
+        # High-frequency event: every L1 mutation. Non-critical (batched fsync).
+        # Consumed offline by scripts/diagnose_ofi.py to reconstruct flow-OFI
+        # per Brief 18 (arXiv:2505.17388).
+        self._write("book_change", {
+            "bid": bid,
+            "bid_qty": bid_qty,
+            "ask": ask,
+            "ask_qty": ask_qty,
+        })
+
     def record_rejection(
         self,
         *,

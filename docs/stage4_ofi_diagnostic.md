@@ -1,7 +1,8 @@
 # Stage 4 — OFI Mean-Reversion Diagnostic (Phase 2 / A2.1)
 
-**Status**: NOT STARTED
+**Status**: NOT STARTED (blocked on Phase 0.5 book_change accrual)
 **Pre-registered**: 2026-05-15
+**Updated**: 2026-05-15 (purist signal switch — see below)
 **Author**: Antoine
 **Parent plan**: `docs/microprice_ofi_plan.md` Phase 2
 
@@ -9,33 +10,82 @@
 
 ## Goal
 
-Validate Brief 18's claim ([2505.17388](https://arxiv.org/abs/2505.17388)) that
-**Order Flow Imbalance shocks mean-revert on short horizons**. Brief 18 showed
-this empirically on CSI 300 Index Futures (Chinese equity index). The
-brief author flagged a crypto-specific caveat:
+Validate Brief 18's claim ([2505.17388](https://arxiv.org/abs/2505.17388))
+that **signed Order Flow Imbalance shocks mean-revert on short horizons**,
+and concurrently compare it against the bot's existing L1 depth-imbalance
+signal. Pick whichever is the stronger predictor of adverse markout for our
+markets (if any).
+
+Brief 18's CSI 300 result was on Chinese equity index futures. The brief
+author flagged a crypto caveat:
 
 > "OFI shocks in crypto can be liquidations that don't mean-revert (they trend)."
 
-We need to verify which regime our specific markets (DOT, NEAR, XNG, ETH, MU)
-are in **before wiring OFI as a skew term in quoting**.
+We need to verify the regime empirically on DOT, NEAR, XNG, plus ETH/MU
+historical for power.
+
+---
+
+## Two signals tested
+
+### Signal A — Flow-OFI (Brief 18 definition)
+
+```
+ΔV_b(t) =  bid_qty_t                if bid_price_t > bid_price_{t-1}
+        =  bid_qty_t − bid_qty_{t-1} if bid_price_t = bid_price_{t-1}
+        = −bid_qty_{t-1}             if bid_price_t < bid_price_{t-1}
+(symmetric for ask)
+
+OFI_window(t) = Σ_{s ∈ [t−w, t]}  ΔV_b(s) − ΔV_a(s)
+```
+
+Computed from the `book_change` event stream (Phase 0.5 output). Aggregated
+over rolling window `w = imbalance_window_s` (default 2.0s).
+
+### Signal B — L1 depth-imbalance (existing bot signal)
+
+```
+imb(t) = (bid_qty(t) − ask_qty(t)) / (bid_qty(t) + ask_qty(t))   ∈ [−1, +1]
+imb_window(t) = EWMA of imb over imbalance_window_s
+```
+
+This is exactly what `orderbook_manager.orderbook_imbalance(window_s)` returns
+today. Reconstructible from either the L1 state in `book_change` events, or
+the pre-computed `fill.market_snapshot.imbalance` field.
 
 ---
 
 ## Pre-registered decision criterion
 
-**Proceed to A2.2** if and only if:
+Run both signals against the same `+5s mid markout` outcome. Decide per
+the following matrix:
 
-> On at least one market with n ≥ 100 fills, OFI is **monotonically related**
-> to subsequent +5s markout with the **mean-reverting sign**:
-> - High positive OFI (buying pressure) quintile → negative mean markout for **bid** fills (i.e., price reverts down after the shock).
-> - Symmetric for ask fills.
-> - Spearman rank correlation across OFI quintiles, p < 0.05.
+| Signal A (flow-OFI) | Signal B (depth-imb) | Action |
+|---|---|---|
+| PASS | PASS | Use whichever has stronger Spearman ρ (typically A) in Phase 4 |
+| PASS | FAIL | Use A. Brief 18 confirmed; depth-imbalance was a weaker proxy. |
+| FAIL | PASS | Use B. Brief 18 doesn't transfer; the depth-ratio still works. |
+| FAIL | FAIL | Skip A2. Crypto trends after order-flow shocks. Document. |
 
-**Skip A2 entirely** if:
-- High-positive OFI predicts **positive** markout (trending regime — Brief 18's crypto caveat confirmed).
-- Or no monotone relationship in either direction.
+**PASS** = monotone mean-reverting relationship with subsequent markout,
+Spearman p < 0.05, on at least one market with n ≥ 100 fills, and sign
+consistent across that market's bid + ask sides.
 
-If only some markets pass, A2.2 only ships to the passing markets.
+**FAIL** = null, or trending sign (high positive signal → positive markout
+for bid fills).
+
+If only some markets PASS for a given signal, A2.2 only ships to the passing
+markets.
+
+---
+
+## Phase 0.5 dependency
+
+Signal A (flow-OFI) requires the `book_change` event stream from Phase 0.5.
+Without it, only Signal B can be computed (from fill-time snapshots).
+
+If, for whatever reason, Phase 0.5 is delayed: fall back to Signal B-only
+diagnostic. Document this fallback in the verdict.
 
 ---
 
@@ -43,21 +93,24 @@ If only some markets pass, A2.2 only ships to the passing markets.
 
 `scripts/diagnose_ofi.py` (to be written):
 
-1. Accept `--journal <path>` (repeatable, pooled).
-2. For each tick where we have book state, compute the **rolling OFI**:
-   - `Δbid_qty = bid_qty_t − bid_qty_{t-1}` (at the best bid level)
-   - `Δask_qty = ask_qty_t − ask_qty_{t-1}` (at the best ask level)
-   - Sum these signed quantity changes over a rolling window of `imbalance_window_s` seconds (default 2.0s).
-   - `OFI_t = (Σ Δbid_qty − Σ Δask_qty) / (|Σ Δbid_qty| + |Σ Δask_qty|)` ∈ [−1, +1]
-3. For each `fill` event:
-   - Compute the prevailing `OFI` at fill time.
-   - Compute `+5s mid markout` (same as Stage 3).
-4. Bucket fills by OFI quintile (5 buckets per side).
-5. Report:
-   - Mean +5s markout per OFI quintile, per side.
-   - Spearman ρ between OFI quintile rank and mean markout.
-   - Sanity: distribution of OFI (mean, std, percentiles).
-   - Stratified by inventory bucket.
+1. Accept `--journal <path>` (repeatable, pooled). Loads both `fill` and
+   `book_change` events.
+2. **For Signal A (flow-OFI)** — requires `book_change` events:
+   - Walk the `book_change` stream chronologically.
+   - At each event, compute `ΔV_b` and `ΔV_a` per the formula above.
+   - Maintain a deque of `(ts, ΔV_b, ΔV_a)` over the last `imbalance_window_s` seconds.
+   - On each `fill` event, sum the deque and compute the normalized OFI.
+3. **For Signal B (depth-imbalance)** — works with either source:
+   - For fills where `fill.market_snapshot.imbalance` is present, use it directly.
+   - For fills predating Phase 0.5, recompute from `bids_top[0]/asks_top[0]` sizes.
+4. Compute `+5s mid markout` for each fill (same as Stage 3).
+5. Bucket fills by signal quintile (5 buckets per side, per signal).
+6. Report:
+   - Mean +5s markout per quintile, per side, per signal.
+   - Spearman ρ between quintile rank and mean markout, per signal.
+   - Side-by-side: Signal A ρ vs Signal B ρ.
+   - Distribution of each signal (mean, std, percentiles).
+   - Inventory-bucket stratification.
 
 ---
 

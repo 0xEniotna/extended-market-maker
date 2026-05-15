@@ -1,10 +1,11 @@
 # Plan: A1 (Microprice as Fair Value) + A2 (OFI in Quoting)
 
-**Status**: Draft — pending kick-off
+**Status**: Phase 0 complete; Phase 0.5 in progress
 **Created**: 2026-05-15
+**Last updated**: 2026-05-15 (added Phase 0.5 — book_change instrumentation)
 **Backbone**: `project_learnings.md` ranked top-5, items 1 and 2
 **Parent branch**: `funding-aware-mm`
-**Working branch**: `microprice-ofi` (to be created)
+**Working branch**: `microprice-ofi`
 
 ---
 
@@ -50,29 +51,116 @@ New modules:
 ## Order of operations
 
 ```
-Phase 0  ─ Setup branch + decision-doc skeletons
-Phase 1  ─ A1.1 microprice diagnostic (analytics, ~½ day)
-Phase 2  ─ A2.1 OFI mean-reversion diagnostic (analytics, ~1 day)
-Gate 1   ─ Do diagnostics support shipping?
-Phase 3  ─ A1.2 microprice in quoting (code + replay, ~1.5 days)
-         ─ DOT iter002 live A/B (≥6 days)
-Gate 2   ─ Bake in microprice?
-Phase 4  ─ A2.2 OFI skew in quoting (code + calibration + replay, ~2-3 days)
-         ─ DOT iter003 live A/B (≥6 days)
-Gate 3   ─ Bake in OFI skew?
-Phase 5  ─ Roll to NEAR + XNG (~2 days)
+Phase 0    ─ Setup branch + decision-doc skeletons (DONE)
+Phase 0.5  ─ Instrument book_change journal event (code + 24-48h accrual)
+Phase 1    ─ A1.1 microprice diagnostic (analytics, ~½ day) — runs in PARALLEL with 0.5
+Phase 2    ─ A2.1 true flow-OFI diagnostic (analytics, ~1 day) — gated on 0.5
+Gate 1     ─ Do diagnostics support shipping?
+Phase 3    ─ A1.2 microprice in quoting (code + replay, ~1.5 days)
+           ─ DOT iter002 live A/B (≥6 days)
+Gate 2     ─ Bake in microprice?
+Phase 4    ─ A2.2 OFI skew in quoting (code + calibration + replay, ~2-3 days)
+           ─ DOT iter003 live A/B (≥6 days)
+Gate 3     ─ Bake in OFI skew?
+Phase 5    ─ Roll to NEAR + XNG (~2 days)
 ```
+
+**Why Phase 0.5 was added.** Phase 0's journal spot-check revealed that
+existing journals carry bid/ask **sizes** only in `fill.market_snapshot` events.
+Brief 18's mean-reversion result is specifically about signed flow
+(`ΔV_b − ΔV_a` over time), which is **not reconstructible** from existing
+journals because L1 book mutations between fills aren't journaled at
+sub-event resolution. Three options considered:
+
+1. **Pragmatic**: validate the existing L1 depth-ratio signal
+   (`market_snapshot.imbalance`). Risk: false positive/negative because this
+   is not Brief 18's signal.
+2. **Purist** (selected): instrument a `book_change` journal event capturing
+   every L1 mutation with `(bid, bid_qty, ask, ask_qty)`. Adds ~2-3 days.
+   Once instrumented, the same diagnostic validates **both** flow-OFI and
+   depth-imbalance against subsequent markout and picks the winner.
+3. **Defer**: ship microprice first, skip A2 entirely.
+
+The purist option was chosen because (a) the marginal cost is small,
+(b) it produces a clean comparison that resolves Brief 18's crypto caveat
+empirically, and (c) the same instrumentation is reusable for future
+microstructure research (e.g., the eventual fill-model simulator in the
+user's top-5 item 4).
 
 ---
 
-## Phase 0 — Setup (½ day)
+## Phase 0 — Setup (DONE 2026-05-15)
 
-| Deliverable | Path |
+| Deliverable | Path | Status |
+|---|---|---|
+| New branch | `microprice-ofi` off `funding-aware-mm` (at `a37b904`) | ✅ |
+| Decision-doc skeletons | `docs/iter_decisions/TBD_DOT-USD_*` | ✅ |
+| Stage doc placeholders | `docs/stage3_*.md`, `docs/stage4_*.md` | ✅ |
+| Journal resolution spot-check | (DOT, ETH, etc.) | ✅ surfaced the book_change need |
+
+Phase 0 was committed in `4e69bd1`.
+
+---
+
+## Phase 0.5 — Instrument `book_change` event (~1-2 days dev + 24-48h accrual)
+
+**Goal**: capture every L1 book mutation in the journal so Brief 18-style
+flow-OFI can be reconstructed offline.
+
+### Design
+
+- **New event type**: `book_change`, emitted from `orderbook_manager.py`.
+- **Payload (minimal)**: `{ts, seq, run_id, schema_version, type:"book_change", market, bid, bid_qty, ask, ask_qty}` — 4 numeric fields beyond the standard envelope.
+- **Emission gate** (in `OrderbookManager`): dedup by comparing
+  `(bid_price, bid_qty, ask_price, ask_qty)` to last-emitted tuple. Emit
+  only when at least one of the four changed. This avoids redundant events
+  when deeper book levels mutate but L1 is unchanged.
+- **Trigger point**: end of `_on_orderbook_update`, after the existing
+  `_record_mid`/`_record_imbalance` calls. Single emission per book event.
+- **Schema version**: stays at v2. Adding a new event type doesn't break
+  consumers — unknown types are ignored.
+- **fsync class**: non-critical (batched). High frequency expected; durability
+  per-event would dominate latency. The existing batch-fsync covers it.
+- **Failure mode**: emission wrapped in try/except so a journal write error
+  cannot kill the WS callback path.
+
+### Files
+
+| File | Change |
 |---|---|
-| New branch | `microprice-ofi` off `funding-aware-mm` |
-| Decision-doc skeleton (microprice) | `docs/iter_decisions/2026-05-XX_DOT-USD_microprice_iter002.md` |
-| Decision-doc skeleton (OFI) | `docs/iter_decisions/2026-05-XX_DOT-USD_ofi_iter003.md` |
-| Stage doc placeholders | `docs/stage3_microprice_*.md`, `docs/stage4_ofi_*.md` |
+| `src/market_maker/trade_journal.py` | Add `record_book_change(bid, bid_qty, ask, ask_qty)` method |
+| `src/market_maker/orderbook_manager.py` | Add `set_journal()`, dedup tracker, `_maybe_emit_book_change()` call from `_on_orderbook_update` |
+| `src/market_maker/strategy_runner.py` | Wire `orderbook_manager.set_journal(journal)` at startup (matches the existing `account_stream.set_journal` / `order_mgr.set_journal` pattern) |
+| `tests/test_book_change_event.py` | Unit tests: dedup correctness, payload structure, journal write |
+
+### Volume / disk budget
+
+Rough estimate at current DOT volatility:
+- ~10-50 L1 mutations/sec during active hours = 36k-180k events/hour
+- Each event ~150 bytes JSON = 5-25 MB/hour per market
+- 50-100 MB/market/day, well within the existing 50 MB rotation limit
+- 3 active markets = 150-300 MB/day total → ~5-10 GB/month. Manageable.
+
+If volume becomes a problem later:
+- Add a `min_emit_interval_ms` throttle (e.g., 50ms) — at the cost of resolution
+- Or filter by `|Δqty| > threshold`
+- Both are easy follow-ups; ship full-resolution first.
+
+### Rollout
+
+1. Code + tests on `microprice-ofi` branch, commit.
+2. Deploy to **DOT-USD only** first (lowest blast radius).
+3. Monitor 24h: check journal size growth, no perf regression, no error spike.
+4. If clean, expand to NEAR-USD and XNG-USD.
+5. After ≥24-48h of `book_change` accrual on DOT, Phase 2 can run.
+
+### Acceptance criteria
+
+Pre-registered:
+- `book_change` events present in fresh DOT journal at expected volume (≥1k events/h).
+- No new error log entries above baseline.
+- Bot quote latency p95 unchanged.
+- Events parse cleanly with `analyse_mm_journal.py` (or are ignored without traceback).
 
 ---
 
@@ -102,19 +190,33 @@ Phase 5  ─ Roll to NEAR + XNG (~2 days)
 
 ## Phase 2 — A2.1: OFI mean-reversion diagnostic (analytics only)
 
-**Goal**: validate Brief 18's claim that OFI shocks mean-revert. The brief flagged that crypto liquidations may trend instead — we must know which regime our markets are in.
+**Prerequisite**: Phase 0.5 must have accrued ≥24-48h of `book_change` events on at least one running market (DOT).
+
+**Goal**: validate Brief 18's claim that signed flow-OFI shocks mean-revert. Compare against the existing depth-imbalance signal to determine which is the better predictor of adverse markout for our markets.
 
 **Deliverables**:
 - `scripts/diagnose_ofi.py`
-  - OFI per event: `(Δbid_qty − Δask_qty) / (|Δbid_qty| + |Δask_qty|)` rolling over `imbalance_window_s` (default 2.0s — keep config-aligned)
-  - Bucket each fill by OFI sign + magnitude (quintiles)
-  - Compute mean `+5s markout` per bucket, per side
-  - Output: monotonicity test (Spearman ρ between OFI quintile rank and signed markout)
-- Run on DOT/NEAR/XNG/ETH historical
+  - **Two signals computed in parallel** from the `book_change` event stream:
+    - **Flow-OFI (Brief 18)**: standard signed-flow formula
+      ```
+      ΔV_b(t) = bid_qty_t               if bid_price_t > bid_price_{t-1}
+              = bid_qty_t - bid_qty_{t-1}  if bid_price_t == bid_price_{t-1}
+              = -bid_qty_{t-1}            if bid_price_t < bid_price_{t-1}
+      (symmetric for ask)
+      OFI(t) = ΔV_b(t) - ΔV_a(t)
+      ```
+      Aggregated over rolling window `imbalance_window_s` (default 2.0s).
+    - **Depth-imbalance** (existing bot signal): `(bid_qty − ask_qty) / (bid_qty + ask_qty)` at L1, EWMA-smoothed.
+  - Bucket each fill by each signal's quintile.
+  - Compute mean `+5s markout` per bucket, per side, per signal.
+  - Output two monotonicity tests (Spearman ρ for each signal).
+- Run on DOT first; expand to NEAR/XNG once they have `book_change` data too.
 
 **Decision criteria** (pre-registered in `docs/stage4_ofi_diagnostic.md`):
-- **Proceed to A2.2** if: high-positive OFI quintile → negative mean markout for bid fills (and symmetric for ask). Monotone across quintiles. `p < 0.05`.
-- **Skip A2** if: high-positive OFI predicts positive markout (trending — Brief 18's crypto caveat confirmed for our markets). Document, archive, move on.
+- **Proceed to A2.2 with flow-OFI** if: flow-OFI shows monotone mean-reverting relationship (high positive flow-OFI quintile → negative markout for bid fills), p < 0.05.
+- **Proceed to A2.2 with depth-imbalance** if: only depth-imbalance is monotone mean-reverting (and flow-OFI is null/trending). Use the cheaper, already-computed signal.
+- **Proceed with whichever signal is stronger** if both pass.
+- **Skip A2** if: both signals fail (trending or null). Document Brief 18's caveat as confirmed for our markets.
 
 **Effort**: 1 day script + ½ day analysis.
 
@@ -286,19 +388,23 @@ Approximate LOC: A1 ~150 (incl tests + scripts), A2 ~400 (incl tests + scripts +
 
 | Day | Work |
 |---|---|
-| 1 (½) | Phase 0 setup + Phase 1 diagnostic script |
-| 1 (½) – 2 | Run Phase 1, write `stage3_microprice_diagnostic.md` |
-| 2 – 3 | Phase 2 diagnostic + write `stage4_ofi_diagnostic.md` |
-| 3 | Decision Gate 1 (`stage3_4_gate_decision.md`) |
-| 4 – 5 | Phase 3 microprice code, tests, replay |
-| 5 – 11 | DOT iter002 live A/B (≥6 days) |
-| 11 | Decision Gate 2 + bake-in or rollback |
-| 12 – 14 | Phase 4 OFI code, calibration, replay |
-| 14 – 20 | DOT iter003 live A/B (≥6 days) |
-| 20 | Decision Gate 3 + bake-in or rollback |
-| 21 – 22 | Phase 5 roll to NEAR + XNG |
+| 0 | Phase 0 setup (DONE — branch + decision-doc skeletons + journal spot-check) |
+| 1 | Phase 0.5 code (book_change instrumentation) + tests |
+| 1 | Phase 1 diagnostic script (in parallel — uses fill snapshots, doesn't need 0.5) |
+| 2 | Phase 0.5 rollout to DOT-USD; monitor 24h |
+| 2 – 3 | Run Phase 1, write `stage3_microprice_diagnostic.md` |
+| 3 – 4 | book_change journal accumulation; Phase 0.5 expand to NEAR/XNG |
+| 4 – 5 | Phase 2 diagnostic (flow-OFI + depth-imbalance compared); write `stage4_*` |
+| 5 | Decision Gate 1 (`stage3_4_gate_decision.md`) |
+| 6 – 7 | Phase 3 microprice code, tests, replay |
+| 7 – 13 | DOT iter002 live A/B (≥6 days) |
+| 13 | Decision Gate 2 + bake-in or rollback |
+| 14 – 16 | Phase 4 OFI code, calibration, replay |
+| 16 – 22 | DOT iter003 live A/B (≥6 days) |
+| 22 | Decision Gate 3 + bake-in or rollback |
+| 23 – 24 | Phase 5 roll to NEAR + XNG |
 
-**Total elapsed**: ~3 weeks. Heads-down dev: ~6-7 days. Rest is waiting on live A/B sample accrual.
+**Total elapsed**: ~3.5 weeks (was 3 — Phase 0.5 adds ~2-3 days). Heads-down dev: ~8-9 days. Rest is waiting on journal/A-B sample accrual.
 
 ---
 
