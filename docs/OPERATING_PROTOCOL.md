@@ -199,13 +199,27 @@ MARKET=mu_24_5
 ssh mm-bot 'cp /root/MM/.env.'$MARKET' /root/MM/.env.'$MARKET'.'$ITER' && chmod 600 /root/MM/.env.'$MARKET'.'$ITER
 # Edit the iter file
 ssh mm-bot 'sed -i "s/^MM_MIN_OFFSET_BPS=.*/MM_MIN_OFFSET_BPS=8/" /root/MM/.env.'$MARKET'.'$ITER
-# Symlink into worktree if running from there
-ssh mm-bot 'ln -sf /root/MM/.env.'$MARKET'.'$ITER' /root/MM-funding-aware/.env.'$MARKET'.'$ITER
 # Launch
 ssh mm-bot 'cd /root/MM && PATH=/root/MM/.venv/bin:$PATH mmctl start '$MARKET'.'$ITER
-# OR from worktree:
-ssh mm-bot 'cd /root/MM-funding-aware && PYTHONPATH=/root/MM-funding-aware/src PATH=/root/MM/.venv/bin:$PATH mmctl start '$MARKET'.'$ITER
+# Snapshot PnL baseline AFTER launch (so since-restart PnL is accurate)
+ssh mm-bot 'cd /root/MM && PATH=/root/MM/.venv/bin:$PATH python3 scripts/update_pnl_baseline.py --market '$MARKET'-USD --context "'$ITER' launch"'
 ```
+
+### Check since-restart PnL
+
+```bash
+ssh mm-bot 'cd /root/MM && PATH=/root/MM/.venv/bin:$PATH python3 scripts/pnl_since_restart.py'
+# Single market:
+ssh mm-bot 'cd /root/MM && PATH=/root/MM/.venv/bin:$PATH python3 scripts/pnl_since_restart.py --market DOT-USD'
+# JSON output:
+ssh mm-bot 'cd /root/MM && PATH=/root/MM/.venv/bin:$PATH python3 scripts/pnl_since_restart.py --json'
+```
+
+The script reads `data/pnl_baselines.json` for each market's last-snapshot
+PnL value, calls `mmctl pnl <m>` to get the current value, and shows the
+delta. The "Match" column shows ✓ if the journal's run_id matches the
+baseline run_id (delta is accurate) or ✗ STALE if the bot has been
+restarted since the baseline was captured.
 
 ### Rollback an iter
 
@@ -238,7 +252,7 @@ python scripts/diagnose_markout.py --market <MARKET-UPPER> \
 
 | Gap | Workaround | Long-term fix |
 |---|---|---|
-| `mmctl pnl` has no `--since/--until` | Subtract two cumulative snapshots, use journal timestamps to anchor | Add date filtering to mmctl |
+| `mmctl pnl` has no `--since/--until` | Use `scripts/pnl_since_restart.py` (reads `data/pnl_baselines.json`) | Add date filtering to mmctl |
 | No `config_change` event on SIGHUP | Restart bot (stop+start) for any config change | Emit event in `rebuild_components` |
 | No automatic `.env.<m>` snapshot on edit | Manual `cp .env.<m> .env.<m>.snap.YYYYMMDD` before edit | Wrap edit in a script that snapshots |
 | No statistical-power check before launching iters | Estimate fills/h × hours-of-test; require ≥30 for any directional claim | Add a `tools/power_check.py` |
