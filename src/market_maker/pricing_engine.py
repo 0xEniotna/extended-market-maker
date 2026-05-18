@@ -38,13 +38,45 @@ class PricingEngine:
         self._tick_size_f = float(tick_size)
         self._base_order_size = base_order_size
         self._min_order_size_step = min_order_size_step
+        self._offset_mode_value = self._coerce_offset_mode(self._settings.offset_mode)
+        self._spread_multiplier_f = self._to_float(self._settings.spread_multiplier)
+        self._min_offset_bps_f = self._to_float(self._settings.min_offset_bps)
+        self._max_offset_bps_f = self._to_float(self._settings.max_offset_bps)
+        self._fixed_offset_pct_f = self._to_float(
+            self._settings.price_offset_per_level_percent
+        )
+        self._max_position_size_f = self._to_float(self._settings.max_position_size)
+        self._inventory_warn_pct = self._to_decimal(self._settings.inventory_warn_pct)
+        self._inventory_critical_pct = self._to_decimal(
+            self._settings.inventory_critical_pct
+        )
+        self._inventory_hard_pct = self._to_decimal(self._settings.inventory_hard_pct)
+        self._inventory_warn_pct_f = self._to_float(self._settings.inventory_warn_pct)
+        self._inventory_critical_pct_f = self._to_float(
+            self._settings.inventory_critical_pct
+        )
+        self._inventory_hard_pct_f = self._to_float(self._settings.inventory_hard_pct)
+        self._inventory_deadband_pct_f = max(
+            0.0,
+            min(1.0, self._to_float(self._settings.inventory_deadband_pct)),
+        )
+        self._skew_shape_k_f = max(0.0, self._to_float(self._settings.skew_shape_k))
+        self._skew_max_bps_f = self._to_float(self._settings.skew_max_bps)
+        self._inventory_skew_factor_f = self._to_float(
+            self._settings.inventory_skew_factor
+        )
+        self._market_profile = str(self._settings.market_profile)
+        self._trend_skew_boost_f = self._to_float(self._settings.trend_skew_boost)
 
-    def _offset_mode(self) -> str:
-        mode = self._settings.offset_mode
+    @staticmethod
+    def _coerce_offset_mode(mode: object) -> str:
         if isinstance(mode, str):
             return mode
         value = getattr(mode, "value", mode)
         return str(value)
+
+    def _offset_mode(self) -> str:
+        return self._offset_mode_value
 
     def round_to_tick(self, price: Decimal, side: Optional[object] = None) -> Decimal:
         """Round price to the nearest tick — stays Decimal for exchange precision."""
@@ -80,21 +112,21 @@ class PricingEngine:
         """Pure-float offset computation for the hot path."""
         if self._offset_mode() == "dynamic":
             spread_bps_raw = self._ob.spread_bps_ema()
-            spread_bps_f = float(spread_bps_raw) if spread_bps_raw is not None and spread_bps_raw > 0 else self._to_float(self._settings.min_offset_bps)
-
-            multiplier_f = self._to_float(self._settings.spread_multiplier)
-            min_offset_f = self._to_float(self._settings.min_offset_bps)
-            max_offset_f = self._to_float(self._settings.max_offset_bps)
+            spread_bps_f = (
+                float(spread_bps_raw)
+                if spread_bps_raw is not None and spread_bps_raw > 0
+                else self._min_offset_bps_f
+            )
 
             level_mult = level + 1
-            per_level_bps = spread_bps_f * multiplier_f * level_mult
-            floor = min_offset_f * level_mult
-            ceiling = max_offset_f * level_mult
+            per_level_bps = spread_bps_f * self._spread_multiplier_f * level_mult
+            floor = self._min_offset_bps_f * level_mult
+            ceiling = self._max_offset_bps_f * level_mult
             per_level_bps = max(floor, min(per_level_bps, ceiling))
             per_level_bps *= max(0.0, regime_scale_f)
             return best_price_f * per_level_bps / 10000.0
 
-        offset_pct_f = self._to_float(self._settings.price_offset_per_level_percent) * (level + 1)
+        offset_pct_f = self._fixed_offset_pct_f * (level + 1)
         return best_price_f * offset_pct_f / 100.0
 
     def inventory_norm(self) -> Decimal:
@@ -107,7 +139,7 @@ class PricingEngine:
 
     def _inventory_norm_f(self) -> float:
         """Float version of inventory_norm for hot-path use."""
-        max_pos = self._to_float(self._settings.max_position_size)
+        max_pos = self._max_position_size_f
         if max_pos > 0:
             val = float(self._risk.get_current_position()) / max_pos
         else:
@@ -116,11 +148,11 @@ class PricingEngine:
 
     def inventory_band(self) -> str:
         abs_norm = abs(self.inventory_norm())
-        if abs_norm >= self._to_decimal(self._settings.inventory_hard_pct):
+        if abs_norm >= self._inventory_hard_pct:
             return "HARD"
-        if abs_norm >= self._to_decimal(self._settings.inventory_critical_pct):
+        if abs_norm >= self._inventory_critical_pct:
             return "CRITICAL"
-        if abs_norm >= self._to_decimal(self._settings.inventory_warn_pct):
+        if abs_norm >= self._inventory_warn_pct:
             return "WARN"
         return "NORMAL"
 
@@ -131,7 +163,7 @@ class PricingEngine:
     def _skew_component_f(self, trend=None) -> float:
         """Pure-float skew computation for the hot path."""
         inv_norm = self._inventory_norm_f()
-        deadband = max(0.0, min(1.0, self._to_float(self._settings.inventory_deadband_pct)))
+        deadband = self._inventory_deadband_pct_f
         abs_norm = abs(inv_norm)
 
         if abs_norm <= deadband:
@@ -142,7 +174,7 @@ class PricingEngine:
             else:
                 normalized = (abs_norm - deadband) / (1.0 - deadband)
             sign = 1.0 if inv_norm >= 0 else -1.0
-            shape_k = max(0.0, self._to_float(self._settings.skew_shape_k))
+            shape_k = self._skew_shape_k_f
             if shape_k == 0:
                 curve = normalized
             else:
@@ -150,16 +182,13 @@ class PricingEngine:
                 curve = 0.0 if denom == 0 else math.tanh(shape_k * normalized) / denom
             shaped = sign * curve
 
-        max_skew_bps = (
-            self._to_float(self._settings.skew_max_bps)
-            * self._to_float(self._settings.inventory_skew_factor)
-        )
-        if trend is not None and str(self._settings.market_profile) == "crypto":
-            boost = self._to_float(self._settings.trend_skew_boost)
+        max_skew_bps = self._skew_max_bps_f * self._inventory_skew_factor_f
+        if trend is not None and self._market_profile == "crypto":
+            boost = self._trend_skew_boost_f
             strength = float(trend.strength) if hasattr(trend, "strength") else 0.0
             max_skew_bps *= 1.0 + (boost - 1.0) * strength
 
-        if self.inventory_band() in {"WARN", "CRITICAL", "HARD"}:
+        if abs_norm >= self._inventory_warn_pct_f:
             max_skew_bps *= 1.25
 
         return shaped * max_skew_bps

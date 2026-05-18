@@ -61,19 +61,21 @@ class RepricePipeline:
         regime_scale: Decimal = Decimal("1"),
         trend=None,
         funding_bias_bps: Decimal = Decimal("0"),
+        target_price: Optional[Decimal] = None,
     ) -> tuple[bool, str]:
         if current_best == 0:
             return True, "replace_target_shift"
 
-        target_price = self._pricing.compute_target_price(
-            side,
-            level,
-            current_best,
-            extra_offset_bps=extra_offset_bps,
-            regime_scale=regime_scale,
-            trend=trend,
-            funding_bias_bps=funding_bias_bps,
-        )
+        if target_price is None:
+            target_price = self._pricing.compute_target_price(
+                side,
+                level,
+                current_best,
+                extra_offset_bps=extra_offset_bps,
+                regime_scale=regime_scale,
+                trend=trend,
+                funding_bias_bps=funding_bias_bps,
+            )
 
         target_offset = self._pricing.compute_offset(
             level,
@@ -407,6 +409,7 @@ class RepricePipeline:
             regime_scale=market_ctx.regime.offset_scale,
             trend=market_ctx.trend,
             funding_bias_bps=market_ctx.funding_bias_bps,
+            target_price=target_price,
         )
         if should_reprice and not self._cadence_allows_replace(
             strategy,
@@ -435,11 +438,38 @@ class RepricePipeline:
         return bool(should_reprice)
 
     def compute_risk_adjusted_order(
-        self, strategy, side, level, *, level_ctx, quote_inputs, market_ctx,
+        self,
+        strategy,
+        side,
+        level,
+        *,
+        level_ctx,
+        quote_inputs,
+        market_ctx,
+        target_price: Optional[Decimal] = None,
     ) -> RiskAdjustedOrder:
         return _compute_risk_adjusted(
             self, strategy, side, level,
             level_ctx=level_ctx, quote_inputs=quote_inputs, market_ctx=market_ctx,
+            target_price=target_price,
+        )
+
+    def compute_target_price(
+        self,
+        side,
+        level: int,
+        *,
+        quote_inputs: QuoteInputs,
+        market_ctx: RepriceMarketContext,
+    ) -> Decimal:
+        return self._pricing.compute_target_price(
+            side,
+            level,
+            quote_inputs.current_best,
+            extra_offset_bps=quote_inputs.extra_offset_bps,
+            regime_scale=market_ctx.regime.offset_scale,
+            trend=market_ctx.trend,
+            funding_bias_bps=market_ctx.funding_bias_bps,
         )
 
     async def execute_replace_if_needed(
@@ -536,11 +566,9 @@ class RepricePipeline:
                 )
             return
 
-        order_plan = self.compute_risk_adjusted_order(
-            strategy,
+        target_price = self.compute_target_price(
             side,
             level,
-            level_ctx=level_ctx,
             quote_inputs=quote_inputs,
             market_ctx=market_ctx,
         )
@@ -551,11 +579,20 @@ class RepricePipeline:
             level_ctx=level_ctx,
             market_ctx=market_ctx,
             quote_inputs=quote_inputs,
-            target_price=order_plan.target_price,
+            target_price=target_price,
         )
         if not should_continue:
             return
 
+        order_plan = self.compute_risk_adjusted_order(
+            strategy,
+            side,
+            level,
+            level_ctx=level_ctx,
+            quote_inputs=quote_inputs,
+            market_ctx=market_ctx,
+            target_price=target_price,
+        )
         await self.execute_replace_if_needed(
             strategy,
             side,

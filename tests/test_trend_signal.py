@@ -20,6 +20,17 @@ class _FakeOrderbook:
         return self._ref_vol
 
 
+class _LatestMidOrderbook(_FakeOrderbook):
+    def __init__(self, mids, ref_vol: Decimal):
+        super().__init__(mids, ref_vol)
+        self.requested_count = None
+
+    def latest_mid_prices(self, count: int, *, window_s: float):
+        _ = window_s
+        self.requested_count = count
+        return list(self._mids[-count:])
+
+
 def _settings(**overrides):
     base = {
         "trend_enabled": True,
@@ -53,3 +64,12 @@ def test_returns_neutral_when_insufficient_data():
     trend = signal.evaluate()
     assert trend.direction == "NEUTRAL"
     assert trend.strength == Decimal("0")
+
+
+def test_uses_latest_mid_prices_when_available():
+    mids = [Decimal("100") + Decimal(i) * Decimal("0.1") for i in range(80)]
+    ob = _LatestMidOrderbook(mids, Decimal("5"))
+    signal = TrendSignal(_settings(), ob)
+    trend = signal.evaluate()
+    assert trend.direction == "BULLISH"
+    assert ob.requested_count == 30

@@ -27,19 +27,21 @@ def compute_risk_adjusted_order(
     level_ctx: Any,
     quote_inputs: Any,
     market_ctx: RepriceMarketContext,
+    target_price: Decimal | None = None,
 ) -> RiskAdjustedOrder:
     """Compute target price and risk-clipped size for a level."""
     from .reprice_pipeline import RiskAdjustedOrder
 
-    target_price = pipeline._pricing.compute_target_price(
-        side,
-        level,
-        quote_inputs.current_best,
-        extra_offset_bps=quote_inputs.extra_offset_bps,
-        regime_scale=market_ctx.regime.offset_scale,
-        trend=market_ctx.trend,
-        funding_bias_bps=market_ctx.funding_bias_bps,
-    )
+    if target_price is None:
+        target_price = pipeline._pricing.compute_target_price(
+            side,
+            level,
+            quote_inputs.current_best,
+            extra_offset_bps=quote_inputs.extra_offset_bps,
+            regime_scale=market_ctx.regime.offset_scale,
+            trend=market_ctx.trend,
+            funding_bias_bps=market_ctx.funding_bias_bps,
+        )
 
     requested_size = pipeline._pricing.level_size(level)
     counter_side = strategy._counter_trend_side(market_ctx.trend)

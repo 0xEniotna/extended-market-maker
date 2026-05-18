@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -141,6 +141,66 @@ async def test_prepare_quote_inputs_includes_latency_widening():
 
     assert quote_inputs is not None
     assert quote_inputs.extra_offset_bps == Decimal("14")
+
+
+@pytest.mark.asyncio
+async def test_evaluate_holds_without_risk_sizing():
+    pipeline = RepricePipeline(_settings(), Decimal("1"), _PricingStub())
+    settings = _settings(imbalance_window_s=2.0, trend_cancel_counter_on_strong=False)
+    active_order = SimpleNamespace(price=Decimal("99.2"))
+    reserved_exposure = MagicMock(return_value=(Decimal("0"), Decimal("0")))
+    allowed_order_size = MagicMock(return_value=Decimal("1"))
+
+    ob = SimpleNamespace(
+        best_bid=lambda: SimpleNamespace(price=Decimal("100"), size=Decimal("10")),
+        best_ask=lambda: SimpleNamespace(price=Decimal("101"), size=Decimal("10")),
+        is_stale=lambda: False,
+        spread_bps=lambda: Decimal("20"),
+        orderbook_imbalance=lambda window_s: Decimal("0"),
+    )
+    strategy = SimpleNamespace(
+        _level_ext_ids={("BUY", 0): "ext-1"},
+        _level_cancel_pending_ext_id={},
+        _level_pof_until={},
+        _level_stale_since={},
+        _orders=SimpleNamespace(
+            get_active_order=lambda ext_id: active_order if ext_id == "ext-1" else None,
+            reserved_exposure=reserved_exposure,
+            rate_limit_extra_offset_bps=Decimal("0"),
+        ),
+        _risk=SimpleNamespace(allowed_order_size=allowed_order_size),
+        _ob=ob,
+        _settings=settings,
+        _guards=SimpleNamespace(
+            check=lambda **kwargs: GuardDecision(
+                allow=True,
+                reason="allow",
+                extra_offset_bps=Decimal("0"),
+            )
+        ),
+        _normalise_side=lambda side: side,
+        _is_strong_counter_trend_side=lambda side, trend: False,
+        _increases_inventory=lambda side: True,
+        _order_age_exceeded=lambda key, max_age_s=None: False,
+        _record_reprice_decision=lambda **kwargs: None,
+    )
+
+    await pipeline.evaluate(
+        strategy,
+        "BUY",
+        0,
+        market_ctx=RepriceMarketContext(
+            regime=RegimeState(),
+            trend=TrendState(),
+            min_reprice_interval_s=0.0,
+            max_order_age_s=30.0,
+            funding_bias_bps=Decimal("0"),
+            inventory_band="NORMAL",
+        ),
+    )
+
+    reserved_exposure.assert_not_called()
+    allowed_order_size.assert_not_called()
 
 
 @pytest.mark.asyncio

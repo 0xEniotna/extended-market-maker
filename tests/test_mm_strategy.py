@@ -708,6 +708,36 @@ class TestSpreadEma:
 
         assert len(ob._mid_history) == 1
 
+    def test_recent_mid_and_imbalance_windows_ignore_old_samples(self):
+        ob = OrderbookManager.__new__(OrderbookManager)
+        now = time.monotonic()
+        ob._mid_history = deque([
+            (now - 10.0, Decimal("100")),
+            (now - 1.5, Decimal("101")),
+            (now - 1.0, Decimal("103")),
+            (now - 0.5, Decimal("102")),
+        ])
+        ob._mid_history_max_age_s = 120.0
+        ob._imbalance_history = deque([
+            (now - 10.0, Decimal("0.9")),
+            (now - 1.5, Decimal("0.1")),
+            (now - 1.0, Decimal("0.2")),
+            (now - 0.5, Decimal("-0.1")),
+        ])
+        ob._imbalance_history_max_age_s = 120.0
+
+        assert ob.mid_prices(2.0) == [Decimal("101"), Decimal("103"), Decimal("102")]
+        assert ob.latest_mid_prices(2, window_s=2.0) == [Decimal("103"), Decimal("102")]
+        assert ob.micro_volatility_bps(2.0) == (
+            (Decimal("103") - Decimal("101")) / Decimal("102") * Decimal("10000")
+        )
+        assert ob.micro_drift_bps(2.0) == (
+            (Decimal("102") - Decimal("101")) / Decimal("101") * Decimal("10000")
+        )
+        assert ob.orderbook_imbalance(2.0) == (
+            Decimal("0.1") + Decimal("0.2") + Decimal("-0.1")
+        ) / Decimal("3")
+
     @pytest.mark.asyncio
     async def test_bbo_condition_notifies_on_either_side_change(self):
         ob = OrderbookManager(SimpleNamespace(), "TEST-USD")

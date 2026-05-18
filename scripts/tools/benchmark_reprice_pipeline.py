@@ -144,8 +144,10 @@ def _make_strategy(levels: int):
     )
     orders.reserved_exposure.return_value = (Decimal("0"), Decimal("0"))
     orders.active_order_count.return_value = 0
+    orders.prepare_place_order = AsyncMock(return_value=SimpleNamespace(name="permit"))
     orders.cancel_order = AsyncMock(return_value=True)
     orders.place_order = AsyncMock(return_value="ext")
+    orders.avg_placement_latency_ms.return_value = 0.0
     orders.consecutive_failures = 0
 
     strategy = MarketMakerStrategy(

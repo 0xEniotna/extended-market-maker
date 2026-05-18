@@ -30,12 +30,16 @@ class TrendSignal:
             float(self._settings.trend_slow_ema_s),
             float(self._settings.vol_regime_long_window_s),
         )
-        mids = self._ob.mid_prices(window)
-        if len(mids) < 3:
-            return TrendState()
-
         fast_n = max(2, int(float(self._settings.trend_fast_ema_s) / 2.0))
         slow_n = max(fast_n + 1, int(float(self._settings.trend_slow_ema_s) / 2.0))
+
+        latest_mid_prices = getattr(self._ob, "latest_mid_prices", None)
+        if callable(latest_mid_prices):
+            mids = latest_mid_prices(slow_n, window_s=window)
+        else:
+            mids = self._ob.mid_prices(window)
+        if len(mids) < 3:
+            return TrendState()
         if len(mids) < slow_n:
             return TrendState()
 

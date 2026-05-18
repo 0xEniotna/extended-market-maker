@@ -248,6 +248,28 @@ class OrderbookManager:
         """Return recent mid prices over *window_s* seconds."""
         return [mid for _, mid in self._mid_window(window_s)]
 
+    def latest_mid_prices(
+        self,
+        count: int,
+        *,
+        window_s: Optional[float] = None,
+    ) -> List[Decimal]:
+        """Return up to *count* most recent mid prices in chronological order."""
+        if count <= 0:
+            return []
+        now = time.monotonic()
+        self._prune_mid_history(now)
+        cutoff = None if window_s is None or window_s <= 0 else now - float(window_s)
+        out: list[Decimal] = []
+        for ts, mid in reversed(self._mid_history):
+            if cutoff is not None and ts < cutoff:
+                break
+            out.append(mid)
+            if len(out) >= count:
+                break
+        out.reverse()
+        return out
+
     def orderbook_imbalance(self, window_s: float) -> Optional[Decimal]:
         """Return smoothed top-of-book imbalance over *window_s* seconds.
 
@@ -515,7 +537,13 @@ class OrderbookManager:
         now = time.monotonic()
         self._prune_mid_history(now)
         cutoff = now - float(window_s)
-        return [(ts, mid) for ts, mid in self._mid_history if ts >= cutoff]
+        out: list[tuple[float, Decimal]] = []
+        for ts, mid in reversed(self._mid_history):
+            if ts < cutoff:
+                break
+            out.append((ts, mid))
+        out.reverse()
+        return out
 
     def _mid_window_stats(
         self,
@@ -533,13 +561,13 @@ class OrderbookManager:
         high_mid: Optional[Decimal] = None
         low_mid: Optional[Decimal] = None
         count = 0
-        for ts, mid in self._mid_history:
+        for ts, mid in reversed(self._mid_history):
             if ts < cutoff:
-                continue
+                break
             count += 1
-            if first_mid is None:
-                first_mid = mid
-            last_mid = mid
+            if last_mid is None:
+                last_mid = mid
+            first_mid = mid
             high_mid = mid if high_mid is None else max(high_mid, mid)
             low_mid = mid if low_mid is None else min(low_mid, mid)
 
@@ -584,7 +612,13 @@ class OrderbookManager:
         now = time.monotonic()
         self._prune_imbalance_history(now)
         cutoff = now - float(window_s)
-        return [(ts, imb) for ts, imb in self._imbalance_history if ts >= cutoff]
+        out: list[tuple[float, Decimal]] = []
+        for ts, imb in reversed(self._imbalance_history):
+            if ts < cutoff:
+                break
+            out.append((ts, imb))
+        out.reverse()
+        return out
 
     def _imbalance_window_mean(self, window_s: float) -> Optional[Decimal]:
         if window_s <= 0:
@@ -594,9 +628,9 @@ class OrderbookManager:
         cutoff = now - float(window_s)
         total = Decimal("0")
         count = 0
-        for ts, imbalance in self._imbalance_history:
+        for ts, imbalance in reversed(self._imbalance_history):
             if ts < cutoff:
-                continue
+                break
             total += imbalance
             count += 1
         if count == 0:
