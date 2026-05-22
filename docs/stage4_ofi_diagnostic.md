@@ -233,3 +233,33 @@ Per-market verdicts (one of these patterns expected):
 - All FAIL → skip A2 entirely, document Brief 18's caveat as confirmed for our universe
 
 Justification: TBD
+
+
+---
+
+## VERDICT (ran 2026-05-22)
+
+Status: COMPLETE.
+
+Script: scripts/diagnose_ofi.py. Correlates trailing flow-OFI (Cont-
+Kukanov-Stoikov, from book_change events) and the depth-imbalance ratio
+against forward mid return, sampled spaced >= horizon.
+
+| Market | n | Flow-OFI Pearson/Spearman | depth-imb | Verdict |
+|---|---|---|---|---|
+| DOT-USD | 11-24k | -0.20 / -0.23 | -0.03 | PASS (strong, mean-reverting) |
+| TECH100m-USD | 9-22k | -0.01 to -0.11 | +0.05 to +0.08 | INCONCLUSIVE (weak, mixed) |
+
+Findings:
+1. Flow-OFI (CKS) is ~6x stronger than the depth-imbalance ratio the bot
+   currently computes. Use FLOW-OFI from book_change deltas.
+2. Sign is NEGATIVE (mean-reverting) on DOT: net buy pressure precedes a
+   downward mid revert over 5-30s. Holds on crypto at this horizon.
+3. Strong on crypto (DOT), weak/mixed on index (TECH100m) -- same pattern
+   as the microprice diagnostic.
+4. Horizon caveat: short-horizon (5-30s) transient-impact reversion,
+   distinct from the multi-day macro trend bleed.
+
+Decision: build OFI skew for DOT first (flow-OFI, mean-reversion sign),
+after microprice ships. Skip TECH100m. Per-market reports:
+docs/stage4_ofi_DOT.md, docs/stage4_ofi_TECH100m.md.
