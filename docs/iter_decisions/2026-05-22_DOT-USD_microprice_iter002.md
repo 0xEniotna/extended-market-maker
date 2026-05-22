@@ -1,8 +1,8 @@
 # DOT-USD microprice A/B — iter002
 
-**Status**: PENDING USER GO. Phase 3 code + replay verification are COMPLETE
-(see below); this is a real-money change and is **not launched**. Awaiting
-explicit "go live".
+**Status**: **LAUNCHED 2026-05-22 17:04 UTC** (pid 401702, label
+`env_dot_iter002`). Phase 3 code + replay verification COMPLETE; user gave GO.
+See §5 launch record.
 **Date drafted**: 2026-05-22
 **Plan**: `docs/microprice_ofi_plan.md` Phase 3
 **Feature**: `MM_USE_MICROPRICE` (size-weighted fair-value recenter, Stoikov 2018)
@@ -72,5 +72,35 @@ safety regression → rename iter002 → baseline, snapshot old.
    both sides; first `order_placed` events present; no error spike.
 7. Pin the baseline window for comparison; set a 50%-sample check reminder.
 
-**Rollback**: `mmctl stop DOT-USD` → `mmctl start DOT-USD` from `.env.dot`.
-Snapshots preserved; origin branches untouched.
+**Rollback**: `mmctl stop DOT-USD` → `mmctl start .env.dot` (baseline). Note
+this also flattens; snapshots preserved (`.env.dot.pre_microprice.20260522`);
+origin branches untouched.
+
+---
+
+## 5. Launch record (2026-05-22 17:04 UTC)
+
+- **Deployed**: `git -C /root/MM pull` → `d8a6a4d` (FF from 6c230de). Live dir
+  now carries the microprice code. The other 5 bots kept their pids (pull does
+  not reload running processes); confirmed all 6 RUNNING post-launch.
+- **Baseline snapshot**: `/root/MM/.env.dot.pre_microprice.20260522`.
+- **Treatment env**: `/root/MM/.env.dot.iter002` = `.env.dot` + the 2 lines
+  only (verified by diff). Started via `mmctl start .env.dot.iter002`.
+- **Live verification**: `run_start` → `use_microprice=True`,
+  `microprice_cap_bps=10`, `market_profile=crypto`; quoting BUY+SELL; 0 errors.
+  Journal: `mm_DOT-USD_20260522_170431.jsonl`.
+- **Transition cost (correction)**: §1 assumed DOT was near-flat — it was
+  **not**. Actual open position at stop = **−348.8 short, $459 notional,
+  −$2.02 unrealized**. The default `flatten_position_on_shutdown=true`
+  flattened it: realized PnL 105.84 → 103.78, i.e. a **one-time ~$2.06 cost**
+  (the −$2.02 MTM loss booked + ~$0.04 taker fee). Treatment now starts FLAT.
+  **For the A/B**: exclude this launch-flatten fill from the treatment $/h, or
+  subtract the ~$2.06 — it is a transition cost, not strategy PnL.
+
+## 6. Monitoring schedule
+
+- **50%-sample check** (~≥15 fills ≈ 2–3 days): compare treatment $/h + mean
+  +5s markout against the pinned `.env.dot` baseline window; apply the §3
+  rollback triggers.
+- **Full readout** (≥6 days, ≥30 fills): bake-in / extend / rollback.
+- Watch for any `drawdown_stop` (immediate rollback).
