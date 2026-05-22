@@ -1,6 +1,6 @@
 # Decision Gate 1 — Stage 3 + Stage 4 outcomes
 
-**Status**: NOT STARTED
+**Status**: DECIDED 2026-05-22 → **PROCEED BOTH** (microprice first, then OFI)
 **Pre-registered**: 2026-05-15
 **Parent plan**: `docs/microprice_ofi_plan.md`
 
@@ -26,13 +26,14 @@ Phase 3 / Phase 4.
 
 ## Stage 3 result
 
-(To be filled after Stage 3 runs.)
-
-- Verdict: TBD
-- Pooled n_fills: TBD
-- Best market correlation: TBD
-- Worst market correlation: TBD
-- Sign consistent across markets? TBD
+- **Verdict: PASS (crypto-only)**
+- Pooled n_fills: ETH historical 1,538 (power); DOT 53 / XNG 104 underpowered
+- Best market correlation: ETH Pearson **+0.41**, Spearman **+0.60** (microprice
+  leads mid)
+- Worst / wrong-sign: MU_24_5 r = −0.25 (p=0.002), SPX500m r = −0.49 (p=0.0002)
+  — TradFi 24/5 stale-book regime ⇒ **crypto-only rollout**
+- Sign consistent across crypto markets? Yes (and the TradFi wrong-sign is a
+  known dust-quote failure mode, gated out in code)
 
 Link: `docs/stage3_microprice_diagnostic.md`
 
@@ -40,16 +41,15 @@ Link: `docs/stage3_microprice_diagnostic.md`
 
 ## Stage 4 result
 
-(To be filled after Stage 4 runs.)
-
-- Verdict: TBD
+- **Verdict: PASS on DOT** (flow-OFI mean-reverting)
 - Per-market verdicts:
-  - DOT-USD: TBD
-  - NEAR-USD: TBD
-  - XNG-USD: TBD
-  - ETH-USD (historical): TBD
-  - MU_24_5-USD (historical): TBD
-- OFI reconstruction was feasible offline: TBD (yes / required instrumentation)
+  - DOT-USD: **PASS** — flow-OFI Pearson −0.20 / Spearman −0.23 at 5–30s
+    (mean-reverting); ~6× stronger than depth-imbalance
+  - TECH100m: INCONCLUSIVE (−0.01 to −0.11)
+  - NEAR-USD / XNG-USD: killed before book_change accrual; N/A
+- OFI reconstruction was feasible offline: required the Phase 0.5
+  `book_change` instrumentation (now live); reconstructed via Cont-Kukanov-
+  Stoikov in `scripts/diagnose_ofi.py`
 
 Link: `docs/stage4_ofi_diagnostic.md`
 
@@ -57,14 +57,21 @@ Link: `docs/stage4_ofi_diagnostic.md`
 
 ## Decision
 
-**[PROCEED BOTH / PROCEED MICROPRICE ONLY / PROCEED OFI ONLY / STOP]** — TBD
+**PROCEED BOTH** — microprice (Phase 3) first, then OFI skew (Phase 4),
+sequenced on DOT-USD per anchoring decision #3 (one change per iter).
 
-Justification: TBD
+Justification: both diagnostics passed on crypto. Microprice has the strongest
+evidence (ETH r=+0.41) and the simplest implementation, so it ships first and
+bakes in before OFI starts live testing — avoiding the correlated-signal
+confound that hid Stage 2's calibration/impl gap.
 
 Resulting work plan:
-- Phase 3 launch target: TBD (or N/A)
-- Phase 4 launch target: TBD (or N/A)
-- Phase 5 (NEAR/XNG roll) launch target: TBD
+- **Phase 3 (microprice)**: CODE + replay verification **COMPLETE 2026-05-22**
+  (`dc30f94`, replay PASS, cap added). Live A/B = DOT iter002, pending user GO
+  (`docs/iter_decisions/2026-05-22_DOT-USD_microprice_iter002.md`).
+- **Phase 4 (OFI skew)**: queued — starts after DOT microprice bakes in.
+- **Phase 5 (roll)**: NEAR/XNG are killed; re-target to current crypto fleet
+  (DOT + any future crypto adds) when the time comes.
 
-Recorded by: TBD
-Date: TBD
+Recorded by: Claude (microprice-ofi session)
+Date: 2026-05-22
