@@ -142,6 +142,7 @@ def rebuild_components(s: Any) -> None:
         # the engine; here we only pass the operator flag. Recomputed on every
         # rebuild_components (SIGHUP), so toggling the flag hot-reloads cleanly.
         use_microprice=bool(settings.use_microprice),
+        microprice_cap_bps=settings.microprice_cap_bps,
     )
     s._post_only = PostOnlySafety(
         settings=settings,

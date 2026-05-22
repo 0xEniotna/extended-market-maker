@@ -157,6 +157,18 @@ class MarketMakerSettings(MarketMakerSettingsBase):
             "engine, so enabling it on a legacy/TradFi market is a no-op."
         ),
     )
+    microprice_cap_bps: Decimal = Field(
+        default=Decimal("10"),
+        ge=0,
+        description=(
+            "Hard cap (bps of mid) on the microprice recentering shift. The "
+            "microprice is unreliable on dislocated/dust-quote books (the "
+            "Stage 3 replay saw a 75 bps tail on wide spreads while calm-book "
+            "p99 was ~2 bps); this clips that tail. Default 10 bps leaves "
+            "normal operation untouched. Only applies when use_microprice and "
+            "market_profile == 'crypto'."
+        ),
+    )
 
     # --- Funding-Aware Overlay (Le 2026 LQ heuristic) ---
     funding_aware_enabled: bool = Field(

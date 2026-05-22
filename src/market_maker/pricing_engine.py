@@ -36,6 +36,7 @@ class PricingEngine:
         funding_aware: Optional[FundingAwarePolicy] = None,
         markout_feedback: Optional[MarkoutFeedbackPolicy] = None,
         use_microprice: bool = False,
+        microprice_cap_bps: Decimal = Decimal("10"),
     ) -> None:
         self._settings = cast(PricingSettingsLike, settings)
         self._ob = cast(OrderbookLike, orderbook_mgr)
@@ -49,6 +50,9 @@ class PricingEngine:
         # path never reads a settings attribute that older fixtures may lack;
         # ``False`` makes the recentering block a pure no-op (byte-identical).
         self._use_microprice: bool = use_microprice
+        # Hard cap (bps of mid) on the microprice shift — clips the dislocated
+        # /dust-book tail the Stage 3 replay surfaced (75 bps on wide spreads).
+        self._microprice_cap_bps: Decimal = microprice_cap_bps
         # Optional LQ funding-aware overlay. ``None`` short-circuits the
         # new path entirely so flag-off is a pure no-op.
         self._funding_aware: Optional[FundingAwarePolicy] = funding_aware
@@ -231,7 +235,14 @@ class PricingEngine:
                 micro_dec = microprice(
                     mp_bid.price, mp_ask.price, mp_bid.size, mp_ask.size,
                 )
-                raw_f += float(micro_dec - mid_dec)
+                shift_dec = micro_dec - mid_dec
+                # Cap |shift| at microprice_cap_bps of mid (dislocation guard).
+                cap_price = mid_dec * self._microprice_cap_bps / Decimal("10000")
+                if shift_dec > cap_price:
+                    shift_dec = cap_price
+                elif shift_dec < -cap_price:
+                    shift_dec = -cap_price
+                raw_f += float(shift_dec)
 
         # Funding-aware LQ overlay (heuristic, gated by MM_FUNDING_AWARE_ENABLED).
         # When the overlay is active, FundingManager.funding_bias_bps() returns 0,

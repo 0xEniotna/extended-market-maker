@@ -116,6 +116,7 @@ def _make_engine(
     ask: Decimal = Decimal("100.05"),
     bid_size: Decimal = Decimal("100"),
     ask_size: Decimal = Decimal("100"),
+    microprice_cap_bps: Decimal = Decimal("10"),
 ) -> PricingEngine:
     return PricingEngine(
         settings=_make_settings(market_profile),
@@ -125,6 +126,7 @@ def _make_engine(
         base_order_size=Decimal("1"),
         min_order_size_step=Decimal("0.1"),
         use_microprice=use_microprice,
+        microprice_cap_bps=microprice_cap_bps,
     )
 
 
@@ -239,6 +241,33 @@ class TestBalancedBookNoOp:
 # ---------------------------------------------------------------------------
 # 4. Flag-on + non-crypto profile — crypto gate blocks the (wrong-sign) shift
 # ---------------------------------------------------------------------------
+
+
+class TestShiftCap:
+    """A dislocated book (wide spread, 10000:1 imbalance) would shift ~50 bps
+    uncapped; microprice_cap_bps must clip it. Guards the 75 bps tail the
+    Stage 3 DOT replay surfaced."""
+
+    _BOOK = dict(bid=Decimal("100"), ask=Decimal("101"),
+                 bid_size=Decimal("10000"), ask_size=Decimal("1"))
+
+    def test_cap_clips_dislocation_tail(self) -> None:
+        off = _make_engine(use_microprice=False, **self._BOOK)
+        capped = _make_engine(use_microprice=True,
+                              microprice_cap_bps=Decimal("2"), **self._BOOK)
+        uncapped = _make_engine(use_microprice=True,
+                                microprice_cap_bps=Decimal("1000"), **self._BOOK)
+        b_off = off.compute_target_price(_BUY, 0, Decimal("100"))
+        b_capped = capped.compute_target_price(_BUY, 0, Decimal("100"))
+        b_uncapped = uncapped.compute_target_price(_BUY, 0, Decimal("100"))
+
+        shift_capped = abs(b_capped - b_off)
+        shift_uncapped = abs(b_uncapped - b_off)
+        # The cap must bite hard: ~2 bps of mid (100.5) ≈ 0.02, vs ~50 bps
+        # uncapped ≈ 0.50.
+        assert shift_capped < shift_uncapped
+        assert shift_capped <= Decimal("0.03")    # ≈ 2 bps + 1 tick
+        assert shift_uncapped >= Decimal("0.10")  # uncapped tail is large
 
 
 class TestCryptoGate:
