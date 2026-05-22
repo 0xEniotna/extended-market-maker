@@ -41,6 +41,7 @@ SETTINGS_FIELD_GROUPS: Dict[str, FrozenSet[str]] = {
         "min_reprice_interval_s", "max_order_age_s",
         "size_scale_per_level", "min_spread_bps",
         "quote_anchor", "markout_anchor",
+        "use_microprice",
     }),
     "trend": frozenset({
         "trend_enabled", "trend_fast_ema_s", "trend_slow_ema_s",

@@ -138,6 +138,10 @@ def rebuild_components(s: Any) -> None:
         min_order_size_step=s._min_order_size_step,
         funding_aware=s._funding_aware,
         markout_feedback=s._markout_feedback,
+        # Microprice recentering (Stage 3 / A1.2). Crypto-only gate lives in
+        # the engine; here we only pass the operator flag. Recomputed on every
+        # rebuild_components (SIGHUP), so toggling the flag hot-reloads cleanly.
+        use_microprice=bool(settings.use_microprice),
     )
     s._post_only = PostOnlySafety(
         settings=settings,

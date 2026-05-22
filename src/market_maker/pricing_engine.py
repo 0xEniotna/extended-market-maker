@@ -6,6 +6,7 @@ from typing import Optional, cast
 
 from .funding_aware import FundingAwarePolicy
 from .markout_feedback import MarkoutFeedbackPolicy
+from .microprice import microprice
 from .types import OrderbookLike, PriceLevelLike, PricingSettingsLike, RiskManagerLike
 from .utils import safe_decimal, safe_float
 
@@ -34,6 +35,7 @@ class PricingEngine:
         min_order_size_step: Decimal,
         funding_aware: Optional[FundingAwarePolicy] = None,
         markout_feedback: Optional[MarkoutFeedbackPolicy] = None,
+        use_microprice: bool = False,
     ) -> None:
         self._settings = cast(PricingSettingsLike, settings)
         self._ob = cast(OrderbookLike, orderbook_mgr)
@@ -42,6 +44,11 @@ class PricingEngine:
         self._tick_size_f = float(tick_size)
         self._base_order_size = base_order_size
         self._min_order_size_step = min_order_size_step
+        # Microprice fair-value recentering flag (Stage 3 / A1.2). Gated at
+        # construction like the funding_aware/markout policies so the hot
+        # path never reads a settings attribute that older fixtures may lack;
+        # ``False`` makes the recentering block a pure no-op (byte-identical).
+        self._use_microprice: bool = use_microprice
         # Optional LQ funding-aware overlay. ``None`` short-circuits the
         # new path entirely so flag-off is a pure no-op.
         self._funding_aware: Optional[FundingAwarePolicy] = funding_aware
@@ -207,6 +214,24 @@ class PricingEngine:
             raw_f = best_f - offset_f - skew_offset_f - funding_offset_f
         else:
             raw_f = best_f + offset_f - skew_offset_f - funding_offset_f
+
+        # Microprice fair-value recentering (Stoikov 2018), gated by
+        # MM_USE_MICROPRICE and crypto-only (Stage 3 showed microprice leads
+        # mid on crypto, corr +0.41, but the WRONG sign on TradFi 24/5).
+        # Shifts both bid and ask by (microprice − mid): a bid-heavy book
+        # (microprice > mid) leans both quotes UP, so we buy more eagerly
+        # before the predicted up-move and avoid selling too cheap into it.
+        # Flag-off or non-crypto ⇒ block skipped, quote byte-identical to
+        # the legacy mid-anchored path.
+        if self._use_microprice and str(self._settings.market_profile) == "crypto":
+            mp_bid = cast(Optional[PriceLevelLike], self._ob.best_bid())
+            mp_ask = cast(Optional[PriceLevelLike], self._ob.best_ask())
+            if mp_bid is not None and mp_ask is not None:
+                mid_dec = (mp_bid.price + mp_ask.price) / 2
+                micro_dec = microprice(
+                    mp_bid.price, mp_ask.price, mp_bid.size, mp_ask.size,
+                )
+                raw_f += float(micro_dec - mid_dec)
 
         # Funding-aware LQ overlay (heuristic, gated by MM_FUNDING_AWARE_ENABLED).
         # When the overlay is active, FundingManager.funding_bias_bps() returns 0,

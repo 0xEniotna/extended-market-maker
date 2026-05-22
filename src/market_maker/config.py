@@ -144,6 +144,20 @@ class MarketMakerSettings(MarketMakerSettingsBase):
         description="Absolute cap (bps) for funding carry bias.",
     )
 
+    # --- Microprice fair-value reference (Stoikov 2018) ---
+    use_microprice: bool = Field(
+        default=False,
+        description=(
+            "Recenter quotes on the size-weighted microprice instead of the "
+            "raw mid. When true, a shift of (microprice - mid) is added to "
+            "both bid and ask raw prices, leaning quotes toward the side the "
+            "book imbalance predicts. Validated crypto-only in Stage 3 "
+            "(ETH corr +0.41); the WRONG sign on TradFi 24/5 means this is "
+            "additionally gated to market_profile == 'crypto' in the pricing "
+            "engine, so enabling it on a legacy/TradFi market is a no-op."
+        ),
+    )
+
     # --- Funding-Aware Overlay (Le 2026 LQ heuristic) ---
     funding_aware_enabled: bool = Field(
         default=False,
