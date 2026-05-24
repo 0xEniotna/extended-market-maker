@@ -151,10 +151,11 @@ class MarketMakerSettings(MarketMakerSettingsBase):
             "Recenter quotes on the size-weighted microprice instead of the "
             "raw mid. When true, a shift of (microprice - mid) is added to "
             "both bid and ask raw prices, leaning quotes toward the side the "
-            "book imbalance predicts. Validated crypto-only in Stage 3 "
-            "(ETH corr +0.41); the WRONG sign on TradFi 24/5 means this is "
-            "additionally gated to market_profile == 'crypto' in the pricing "
-            "engine, so enabling it on a legacy/TradFi market is a no-op."
+            "book imbalance predicts. Works on any market whose book does real "
+            "price discovery (validated PER-MARKET by diagnostic: ETH +0.41, "
+            "DOT, GOOG, TECH100m positive; thin markets like MU null). Enable "
+            "only where the diagnostic shows a positive sign. Magnitude capped "
+            "by microprice_cap_bps."
         ),
     )
     microprice_cap_bps: Decimal = Field(
@@ -165,8 +166,8 @@ class MarketMakerSettings(MarketMakerSettingsBase):
             "microprice is unreliable on dislocated/dust-quote books (the "
             "Stage 3 replay saw a 75 bps tail on wide spreads while calm-book "
             "p99 was ~2 bps); this clips that tail. Default 10 bps leaves "
-            "normal operation untouched. Only applies when use_microprice and "
-            "market_profile == 'crypto'."
+            "normal operation untouched. Only applies when use_microprice "
+            "is true."
         ),
     )
 

@@ -270,21 +270,43 @@ class TestShiftCap:
         assert shift_uncapped >= Decimal("0.10")  # uncapped tail is large
 
 
-class TestCryptoGate:
+class TestProfileAgnostic:
+    """Microprice is decoupled from market_profile: it's gated per-market by
+    the flag (operator enables only where the diagnostic shows a positive
+    sign), NOT by asset class. So it must apply on legacy profiles too, and
+    produce the SAME shift as crypto for identical inputs."""
+
     @pytest.mark.parametrize("bid_size,ask_size", [
         (Decimal("900"), Decimal("100")),
         (Decimal("100"), Decimal("900")),
     ])
-    def test_legacy_profile_ignores_microprice(
+    def test_microprice_applies_on_legacy_profile(
         self, bid_size: Decimal, ask_size: Decimal,
     ) -> None:
         off = _make_engine(use_microprice=False, market_profile="legacy",
                           bid_size=bid_size, ask_size=ask_size)
         on = _make_engine(use_microprice=True, market_profile="legacy",
                          bid_size=bid_size, ask_size=ask_size)
+        # Imbalanced book + flag on ⇒ quotes MUST shift, even on legacy.
         for side in (_BUY, _SELL):
-            assert (off.compute_target_price(side, 0, Decimal("100"))
-                    == on.compute_target_price(side, 0, Decimal("100"))), (
-                "Microprice must be a no-op on non-crypto profiles "
-                "(Stage 3 showed the wrong sign on TradFi)."
+            assert (on.compute_target_price(side, 0, Decimal("100"))
+                    != off.compute_target_price(side, 0, Decimal("100"))), (
+                "Microprice must apply on legacy profiles after decoupling."
             )
+
+    @pytest.mark.parametrize("bid_size,ask_size", [
+        (Decimal("900"), Decimal("100")),
+        (Decimal("100"), Decimal("900")),
+    ])
+    def test_legacy_and_crypto_produce_identical_shift(
+        self, bid_size: Decimal, ask_size: Decimal,
+    ) -> None:
+        legacy = _make_engine(use_microprice=True, market_profile="legacy",
+                             bid_size=bid_size, ask_size=ask_size)
+        crypto = _make_engine(use_microprice=True, market_profile="crypto",
+                             bid_size=bid_size, ask_size=ask_size)
+        # Profile no longer affects the microprice path (trend=None here, so
+        # the only other profile-gated term — trend skew — is inert).
+        for side in (_BUY, _SELL):
+            assert (legacy.compute_target_price(side, 0, Decimal("100"))
+                    == crypto.compute_target_price(side, 0, Decimal("100")))

@@ -220,14 +220,16 @@ class PricingEngine:
             raw_f = best_f + offset_f - skew_offset_f - funding_offset_f
 
         # Microprice fair-value recentering (Stoikov 2018), gated by
-        # MM_USE_MICROPRICE and crypto-only (Stage 3 showed microprice leads
-        # mid on crypto, corr +0.41, but the WRONG sign on TradFi 24/5).
-        # Shifts both bid and ask by (microprice − mid): a bid-heavy book
-        # (microprice > mid) leans both quotes UP, so we buy more eagerly
-        # before the predicted up-move and avoid selling too cheap into it.
-        # Flag-off or non-crypto ⇒ block skipped, quote byte-identical to
-        # the legacy mid-anchored path.
-        if self._use_microprice and str(self._settings.market_profile) == "crypto":
+        # MM_USE_MICROPRICE alone — validated PER-MARKET by diagnostic, not by
+        # asset class. Microprice leads mid where the perp book does real price
+        # discovery (liquid: ETH +0.41, DOT, GOOG, TECH100m) and nulls/inverts
+        # where it is thin (MU); the operator enables the flag only on markets
+        # whose diagnostic shows a positive sign. Shifts both bid and ask by
+        # (microprice − mid), capped at microprice_cap_bps: a bid-heavy book
+        # (microprice > mid) leans both quotes UP — buy before the predicted
+        # up-move, avoid selling too cheap into it. Flag-off ⇒ block skipped,
+        # quote byte-identical to the mid-anchored path.
+        if self._use_microprice:
             mp_bid = cast(Optional[PriceLevelLike], self._ob.best_bid())
             mp_ask = cast(Optional[PriceLevelLike], self._ob.best_ask())
             if mp_bid is not None and mp_ask is not None:
