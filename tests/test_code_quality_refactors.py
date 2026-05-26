@@ -332,7 +332,7 @@ class TestPricingEngineFloat:
 
 
 # ===================================================================
-# 3. Policy generation (generate_policy.py)
+# 3. Config field grouping & metadata (config_metadata.py)
 # ===================================================================
 
 from market_maker.config import MarketMakerSettings  # noqa: E402

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from market_maker.cli.pnl import _parse_since_timestamp, _annualized_returns
+from market_maker.cli.pnl import _annualized_returns, _parse_since_timestamp
 
 
 def test_parse_since_timestamp_accepts_epoch_seconds():

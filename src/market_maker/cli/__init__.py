@@ -44,11 +44,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     register_journal(sub)
 
-    # --- Legacy config commands (from original mmctl.py) ---
-    from market_maker.cli.config_cmd import register as register_config
-
-    register_config(sub)
-
     return parser
 
 

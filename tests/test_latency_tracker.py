@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from market_maker.order_tracking import LatencyTracker
 import market_maker.order_tracking as order_tracking
+from market_maker.order_tracking import LatencyTracker
 
 
 def test_latency_tracker_drains_only_new_samples(monkeypatch) -> None:

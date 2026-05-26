@@ -80,32 +80,11 @@ mmctl journal export --market ETH-USD       # Inventory CSV export
 mmctl journal reprice-quality               # Reprice quality audit
 ```
 
-### Config proposals
+## Configuration
 
-```bash
-mmctl config apply <proposal-id> --json     # Apply a config proposal
-mmctl config rollback MON --to <snapshot>   # Rollback env file
-mmctl config diff <proposal-id>             # Show diff without applying
-```
-
-## Advisor & Scout Workflow
-
-Advisory scripts (recommend-only, never mutate env or restart bots):
-
-```bash
-# Advisor loop (generates config proposals)
-.venv/bin/python scripts/mm_advisor_loop.py
-
-# Approval-gated proposal apply
-.venv/bin/python scripts/mm_advisor_apply.py --proposal-id <id> --approve --json
-
-# Market scout pipeline
-.venv/bin/python scripts/tools/market_scout_pipeline.py
-
-# Auditor decisioning
-.venv/bin/python scripts/tools/auditor_apply_scout.py --print-target auditor
-.venv/bin/python scripts/tools/auditor_followup.py --print-target auditor
-```
+All settings are `MM_*` environment variables loaded from `.env`. See
+[`.env.example`](.env.example) for a starting template and
+[`docs/MM_CONFIG_GUIDE.md`](docs/MM_CONFIG_GUIDE.md) for the full reference.
 
 ## Testing
 
