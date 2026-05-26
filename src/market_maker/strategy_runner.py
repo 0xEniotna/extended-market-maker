@@ -334,9 +334,24 @@ async def _heartbeat_task(ctx: RuntimeContext) -> None:
 
 
 async def _deadman_heartbeat_task(ctx: RuntimeContext) -> None:
-    """Periodically arm the exchange dead-man switch."""
+    """Periodically arm the exchange dead-man switch.
+
+    Extended/x10 exposes no server-side dead-man switch. When the SDK account
+    module lacks ``set_deadman_switch``, disable the feature with a single
+    warning instead of erroring on every heartbeat.
+    """
     countdown_s = int(max(0, ctx.settings.deadman_countdown_s))
     interval_s = max(1.0, float(ctx.settings.deadman_heartbeat_s))
+
+    if not hasattr(ctx.trading_client.account, "set_deadman_switch"):
+        logger.warning(
+            "Dead-man switch unsupported by exchange SDK (no set_deadman_switch); "
+            "feature disabled. Resting orders remain protected by max_order_age_s "
+            "cancellation, GTT order expiry, the margin guard, and shutdown mass-cancel."
+        )
+        ctx.metrics.set_deadman_status(armed=False, countdown_s=0, last_ok_ts=None)
+        return
+
     while True:
         try:
             await ctx.trading_client.account.set_deadman_switch(countdown_s)

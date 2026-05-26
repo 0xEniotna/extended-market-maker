@@ -370,7 +370,8 @@ async def shutdown_core(ctx: RuntimeContext, tasks: list[asyncio.Task]) -> None:
         ctx.strategy._set_runtime_mode("shutdown")
 
     deadman_enabled = bool(getattr(ctx.settings, "deadman_enabled", False))
-    if deadman_enabled:
+    deadman_supported = hasattr(ctx.trading_client.account, "set_deadman_switch")
+    if deadman_enabled and deadman_supported:
         try:
             await ctx.trading_client.account.set_deadman_switch(0)
             logger.info("Dead-man switch disarmed for market=%s", ctx.settings.market_name)
