@@ -1,7 +1,8 @@
 # Live experiments + speed test — 2026-05-24
 
-**Status**: ACTIVE. Consolidated tracker for everything launched 2026-05-24.
-Reconvene checkpoint: **+24–48 h** (agenda at bottom).
+**Status**: PARTIALLY SUPERSEDED — see the **2026-05-28 UPDATE** at the bottom
+(outcomes, kills, kill-pattern). The 2026-05-24 launch records below are kept
+for history.
 **Branch**: `microprice-ofi`. **Live dir**: `/root/MM` @ `14b8c77` (deployed).
 
 ---
@@ -102,3 +103,41 @@ Reconvene checkpoint: **+24–48 h** (agenda at bottom).
    (tight gate, may already have ≥10 fills).
 3. **SPCX reaction-speed markout** — the Step-1 signal for the Tokyo decision.
 4. **Decide Tokyo** (and whether to lower the reprice floor fleet-wide).
+
+---
+
+# 2026-05-28 UPDATE — outcomes, kills, kill-pattern
+
+**Current fleet: 6 running** — DOT, EWY, GOOG, OP, TECH100m, SPCX.
+**microprice ON: DOT + GOOG only.**
+
+### What happened to the 2026-05-24 experiments
+- **DOT microprice** — still ON. Markout favorable (+5.8 @5s) but PnL is
+  directional-inventory-driven (swung +1443 long → −755/−1335 short; ±$50/day).
+- **GOOG microprice** — still ON. Fill-starved (~1/day) → no clean A/B; relies
+  on the +0.13 diagnostic.
+- **TECH100m microprice (iter004) → REVERTED to iter003 (OFF) 05-28.** +0.07
+  signal too marginal + unverifiable (fill-starved) on a top earner. Its
+  idleness was market-driven (activity dropped), not microprice.
+- **EDGE → KILLED 05-28.** Validated while wide (12.7 bps); **woke up, spread
+  collapsed to 7.8 bps (toxic band), markout adverse at ALL horizons (−4.2
+  @5s).** microprice-on can't save a toxic-band market.
+- **SPCX reaction-speed** — continues, rate-safe (rl_hits=0). Markout read still
+  pending (fills slow). Step-1 Tokyo signal TBD.
+- **EWY → SCALED 05-27** (order $300→500, pos $2000→3000, mult 50→85). Strong
+  active-hours markout (+14.5 @5s) on a fat spread; off-hours spread blows out
+  (640 bps) → can't unwind longs (gap risk). Top daily earner, directional.
+
+### New this session
+- **MU → KILLED 05-28** (woke up, toxic-churn adverse selection, −$24/day).
+- **OP + EDEN launched 05-27** as MU replacements ($500 probes, microprice off).
+  **EDEN → KILLED 05-28** — catastrophic skewed-tail markout (−19 @5s, −69
+  @300s); wide 20 bps spread but a tiny volatile token (sharp move crushed the
+  long). **OP continues** (too early, ~3 fills).
+
+### ⭐ KILL PATTERN (see `project_fleet.md` memory for the full table)
+Three failure modes: **(1) toxic-band adverse selection** (≤8 bps; ETH/MU/EDGE
+— often triggered by a *wake-up* volume spike that collapses a wide spread into
+the toxic band); **(2) directional inventory** (NEAR; DOT/EWY swing on it);
+**(3) volatile small-cap** (EDEN — wide spread = volatility pricing, not
+safety). Monitor spread-band + one-sidedness **continuously**, not at launch.
