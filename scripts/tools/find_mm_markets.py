@@ -196,6 +196,8 @@ def _select_markets(
     min_daily_volume: Decimal,
     min_coverage_pct: Decimal,
     min_samples: int,
+    min_open_interest: Decimal = Decimal("0"),
+    min_spread_floor_bps: Decimal = Decimal("0"),
 ) -> List[Dict[str, Any]]:
     selected: List[Dict[str, Any]] = []
     for snapshot in sampled.values():
@@ -206,8 +208,15 @@ def _select_markets(
 
         spread_median = _percentile(spreads, Decimal("50"))
         spread_p90 = _percentile(spreads, Decimal("90"))
+        spread_p10 = _percentile(spreads, Decimal("10"))
         spread_mean = _mean(spreads)
-        if spread_median is None or spread_p90 is None or spread_mean is None:
+        if spread_median is None or spread_p90 is None or spread_mean is None or spread_p10 is None:
+            continue
+
+        # KILL-PATTERN guard #1 (wake-up collapse): reject markets whose spread
+        # DIPS toward the toxic band (low-end p10 below floor). The early tell of
+        # the spread-collapse that killed MU/EDGE once they got active.
+        if min_spread_floor_bps > 0 and spread_p10 < min_spread_floor_bps:
             continue
 
         coverage_pct = Decimal("100")
@@ -227,6 +236,11 @@ def _select_markets(
         if min_daily_volume > 0 and snapshot.daily_volume < min_daily_volume:
             continue
 
+        # KILL-PATTERN guard #2 (thin book): reject low open interest — thin
+        # markets are crash-prone, microprice-null, and hard to unwind (EDEN).
+        if min_open_interest > 0 and snapshot.open_interest < min_open_interest:
+            continue
+
         selected.append(
             {
                 "name": snapshot.name,
@@ -234,6 +248,7 @@ def _select_markets(
                 "_samples": sample_count,
                 "_coverage_pct": coverage_pct,
                 "_spread_median_bps": spread_median,
+                "_spread_p10_bps": spread_p10,
                 "_spread_p90_bps": spread_p90,
                 "_spread_mean_bps": spread_mean,
                 "_vol_pct": vol_pct,
@@ -285,7 +300,7 @@ def _sort_markets(markets: List[Dict[str, Any]], sort_by: str) -> None:
 
 def _print_table(markets: List[Dict[str, Any]], limit: int, min_spread_bps: Decimal) -> None:
     header = (
-        f"{'#':>2}  {'Market':<12} {'Cov%':>7} {'Smed':>7} {'Sp90':>7} {'Savg':>7} {'N':>4} {'Vol%':>8} "
+        f"{'#':>2}  {'Market':<12} {'Cov%':>7} {'Smed':>7} {'Sp10':>7} {'Sp90':>7} {'Savg':>7} {'N':>4} {'Vol%':>8} "
         f"{'OpenInt':>14} {'DailyVol':>14} {'Bid':>10} {'Ask':>10}"
     )
     lines = [header, "-" * len(header)]
@@ -306,6 +321,7 @@ def _print_table(markets: List[Dict[str, Any]], limit: int, min_spread_bps: Deci
             f"{i:>2}  {market.get('name', ''):<12}"
             f" {_fmt(coverage_pct, 1, commas=False):>7}"
             f" {_fmt(spread_median, 1, commas=False):>7}"
+            f" {_fmt(market.get('_spread_p10_bps'), 1, commas=False):>7}"
             f" {_fmt(spread_p90, 1, commas=False):>7}"
             f" {_fmt(spread_mean, 1, commas=False):>7}"
             f" {samples:>4}"
@@ -337,6 +353,7 @@ def _build_json_payload(
             "samples": market.get("_samples"),
             "coverage_pct": market.get("_coverage_pct"),
             "spread_median_bps": market.get("_spread_median_bps"),
+            "spread_p10_bps": market.get("_spread_p10_bps"),
             "spread_p90_bps": market.get("_spread_p90_bps"),
             "spread_mean_bps": market.get("_spread_mean_bps"),
             "vol_pct": market.get("_vol_pct"),
@@ -361,6 +378,8 @@ def _build_json_payload(
             "min_coverage_pct": args.min_coverage_pct,
             "max_vol_pct": args.max_vol_pct,
             "min_daily_volume": args.min_daily_volume,
+            "min_open_interest": args.min_open_interest,
+            "min_spread_floor_bps": args.min_spread_floor_bps,
             "min_samples": min_samples,
             "sort_by": args.sort_by,
         },
@@ -392,8 +411,8 @@ def main() -> int:
     parser.add_argument(
         "--min-spread-bps",
         type=Decimal,
-        default=Decimal("8"),
-        help="Spread threshold in bps used for coverage scoring",
+        default=Decimal("12"),
+        help="Spread threshold in bps for coverage (12 = profitable line; 8 was the toxic edge)",
     )
     parser.add_argument(
         "--max-spread-bps",
@@ -410,14 +429,26 @@ def main() -> int:
     parser.add_argument(
         "--max-vol-pct",
         type=Decimal,
-        default=Decimal("8"),
-        help="Maximum median daily high/low range as percent of mid (0 disables)",
+        default=Decimal("6"),
+        help="Max median daily high/low range as %% of mid (0 disables). Tightened 8->6: EDEN snuck through at 7.79%% and crashed.",
     )
     parser.add_argument(
         "--min-daily-volume",
         type=Decimal,
-        default=Decimal("0"),
-        help="Minimum daily volume (collateral) (0 disables)",
+        default=Decimal("50000"),
+        help="Minimum daily volume (collateral). 0->50k: exclude thin books.",
+    )
+    parser.add_argument(
+        "--min-open-interest",
+        type=Decimal,
+        default=Decimal("50000"),
+        help="Minimum open interest (kill-pattern: thin books crash/are microprice-null). 0 disables.",
+    )
+    parser.add_argument(
+        "--min-spread-floor-bps",
+        type=Decimal,
+        default=Decimal("10"),
+        help="Reject if the low-end (p10) spread dips below this (wake-up-collapse guard). 0 disables.",
     )
     parser.add_argument(
         "--min-samples",
@@ -490,6 +521,8 @@ def main() -> int:
         min_daily_volume=args.min_daily_volume,
         min_coverage_pct=args.min_coverage_pct,
         min_samples=min_samples,
+        min_open_interest=args.min_open_interest,
+        min_spread_floor_bps=args.min_spread_floor_bps,
     )
     _sort_markets(filtered, sort_by=args.sort_by)
 
@@ -503,14 +536,16 @@ def main() -> int:
         )
     )
     print(
-        "Filters: min_spread_bps={} min_coverage_pct={} max_spread_bps={} max_vol_pct={} "
-        "min_daily_volume={} min_samples={} sort_by={}"
+        "Filters: min_spread_bps={} spread_floor_p10={} min_coverage_pct={} max_spread_bps={} "
+        "max_vol_pct={} min_daily_volume={} min_open_interest={} min_samples={} sort_by={}"
         .format(
             args.min_spread_bps,
+            args.min_spread_floor_bps,
             args.min_coverage_pct,
             args.max_spread_bps,
             args.max_vol_pct,
             args.min_daily_volume,
+            args.min_open_interest,
             min_samples,
             args.sort_by,
         )
